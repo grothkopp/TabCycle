@@ -1,0 +1,18 @@
+{
+  "name": "tabcycle",
+  "version": "0.1.0",
+  "description": "Chrome extension to manage the lifecycle of opened tabs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/unit",
+    "test:integration": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/integration",
+    "test:e2e": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/e2e"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "@jest/globals": "^29.7.0",
+    "puppeteer": "^22.0.0"
+  }
+}

@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TabCycle Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <h1>TabCycle Settings</h1>
+
+    <form id="settings-form">
+      <section class="setting-group">
+        <h2>Time Mode</h2>
+        <p class="description">Choose how tab age is measured.</p>
+        <label class="radio-label">
+          <input type="radio" name="timeMode" value="active" checked>
+          <span>Active Time</span>
+          <span class="hint">Only counts time while you're actively using Chrome</span>
+        </label>
+        <label class="radio-label">
+          <input type="radio" name="timeMode" value="wallclock">
+          <span>Wall Clock</span>
+          <span class="hint">Counts real elapsed time regardless of browser usage</span>
+        </label>
+      </section>
+
+      <section class="setting-group">
+        <h2>Thresholds</h2>
+        <p class="description">Set when tabs transition between statuses. Values must be in ascending order.</p>
+
+        <div class="threshold-row">
+          <label for="greenToYellow">Green → Yellow</label>
+          <div class="threshold-input">
+            <input type="number" id="greenToYellow" min="1" step="1" required>
+            <select id="greenToYellowUnit">
+              <option value="minutes">minutes</option>
+              <option value="hours" selected>hours</option>
+              <option value="days">days</option>
+            </select>
+          </div>
+          <span class="error" id="greenToYellow-error"></span>
+        </div>
+
+        <div class="threshold-row">
+          <label for="yellowToRed">Yellow → Red</label>
+          <div class="threshold-input">
+            <input type="number" id="yellowToRed" min="1" step="1" required>
+            <select id="yellowToRedUnit">
+              <option value="minutes">minutes</option>
+              <option value="hours" selected>hours</option>
+              <option value="days">days</option>
+            </select>
+          </div>
+          <span class="error" id="yellowToRed-error"></span>
+        </div>
+
+        <div class="threshold-row">
+          <label for="redToGone">Red → Gone (Close)</label>
+          <div class="threshold-input">
+            <input type="number" id="redToGone" min="1" step="1" required>
+            <select id="redToGoneUnit">
+              <option value="minutes">minutes</option>
+              <option value="hours">hours</option>
+              <option value="days" selected>days</option>
+            </select>
+          </div>
+          <span class="error" id="redToGone-error"></span>
+        </div>
+      </section>
+
+      <div class="actions">
+        <button type="submit" id="save-btn">Save Settings</button>
+        <span class="save-status" id="save-status"></span>
+      </div>
+    </form>
+  </div>
+
+  <script src="options.js" type="module"></script>
+</body>
+</html>

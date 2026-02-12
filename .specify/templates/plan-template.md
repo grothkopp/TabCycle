@@ -3,7 +3,7 @@
 **Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
 **Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command.
+**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
 
 ## Summary
 
@@ -17,27 +17,21 @@
   the iteration process.
 -->
 
-**Language/Version**: [e.g., TypeScript 5.x or NEEDS CLARIFICATION]  
-**Primary Dependencies**: [e.g., webextension-polyfill, zod, vite or NEEDS CLARIFICATION]  
-**Storage**: [e.g., chrome.storage.local/sync, IndexedDB, or N/A]  
-**Testing**: [e.g., Vitest + Playwright + extension integration harness or NEEDS CLARIFICATION]  
-**Target Platform**: [e.g., Chrome Stable (latest + previous) on macOS/Windows/Linux]
-**Manifest Version**: [MUST be Manifest V3 unless explicitly exempted]
-**Extension Contexts**: [e.g., background service worker, content scripts, popup, options]
-**Project Type**: [chrome-extension/monorepo-extension - determines source structure]  
-**Performance Goals**: [e.g., popup interactive <500ms, event handler p95 <200ms]  
-**Constraints**: [e.g., least-privilege permissions, no remote code execution, privacy-safe logging]  
+**Language/Version**: [e.g., Python 3.11, Swift 5.9, Rust 1.75 or NEEDS CLARIFICATION]  
+**Primary Dependencies**: [e.g., FastAPI, UIKit, LLVM or NEEDS CLARIFICATION]  
+**Storage**: [if applicable, e.g., PostgreSQL, CoreData, files or N/A]  
+**Testing**: [e.g., pytest, XCTest, cargo test or NEEDS CLARIFICATION]  
+**Target Platform**: [e.g., Linux server, iOS 15+, WASM or NEEDS CLARIFICATION]
+**Project Type**: [single/web/mobile - determines source structure]  
+**Performance Goals**: [domain-specific, e.g., 1000 req/s, 10k lines/sec, 60 fps or NEEDS CLARIFICATION]  
+**Constraints**: [domain-specific, e.g., <200ms p95, <100MB memory, offline-capable or NEEDS CLARIFICATION]  
 **Scale/Scope**: [domain-specific, e.g., 10k users, 1M LOC, 50 screens or NEEDS CLARIFICATION]
 
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-- [ ] Testing strategy includes unit, integration, and end-to-end coverage for each changed journey.
-- [ ] Logging plan defines structured fields, redaction rules, and stable error codes for new failures.
-- [ ] Documentation plan covers user guidance, developer notes, and changed contracts/permissions.
-- [ ] Extension impact is explicit: contexts touched, service-worker lifecycle risks, and fallback behavior.
-- [ ] Manifest and permission changes follow least privilege with written rationale and review sign-off.
+[Gates determined based on constitution file]
 
 ## Project Structure
 
@@ -62,32 +56,39 @@ specs/[###-feature]/
 -->
 
 ```text
-# [REMOVE IF UNUSED] Option 1: Single extension project (DEFAULT)
-extension/
-├── manifest.json
-├── src/
-│   ├── background/
-│   ├── content/
-│   ├── popup/
-│   ├── options/
-│   └── shared/
-└── assets/
+# [REMOVE IF UNUSED] Option 1: Single project (DEFAULT)
+src/
+├── models/
+├── services/
+├── cli/
+└── lib/
 
 tests/
-├── unit/
+├── contract/
 ├── integration/
-└── e2e/
+└── unit/
 
-# [REMOVE IF UNUSED] Option 2: Monorepo extension
-apps/
-└── extension/
-    ├── manifest.json
-    ├── src/
-    └── assets/
+# [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
+backend/
+├── src/
+│   ├── models/
+│   ├── services/
+│   └── api/
+└── tests/
 
-packages/
-├── shared/
-└── tooling/
+frontend/
+├── src/
+│   ├── components/
+│   ├── pages/
+│   └── services/
+└── tests/
+
+# [REMOVE IF UNUSED] Option 3: Mobile + API (when "iOS/Android" detected)
+api/
+└── [same as backend above]
+
+ios/ or android/
+└── [platform-specific structure: feature modules, UI flows, platform tests]
 ```
 
 **Structure Decision**: [Document the selected structure and reference the real
