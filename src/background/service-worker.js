@@ -6,12 +6,11 @@ import { evaluateAllTabs } from './status-evaluator.js';
 import {
   isSpecialGroup,
   getSpecialGroupType,
-  moveTabToSpecialGroup,
   removeSpecialGroupIfEmpty,
   ungroupTab,
   computeGroupStatus,
   updateGroupColor,
-  sortGroupsIntoZones,
+  sortTabsAndGroups,
   closeGoneGroups,
   dissolveUnnamedSingleTabGroups,
   updateGroupTitlesWithAge,
@@ -329,39 +328,8 @@ async function _runEvaluationCycleInner(cid) {
     delete tabMeta[tabId];
   }
 
-  // Move ungrouped tabs transitioning to yellow/red into special groups
-  const windowsAffected = new Set();
-  for (const [tabId, t] of Object.entries(transitions)) {
-    if (t.newStatus === STATUS.GONE) continue; // already handled above
-    const meta = tabMeta[tabId];
-    if (!meta) continue;
-
-    windowsAffected.add(meta.windowId);
-
-    if (t.newStatus === STATUS.YELLOW && !meta.isSpecialGroup && meta.groupId === null) {
-      const result = await moveTabToSpecialGroup(Number(tabId), 'yellow', meta.windowId, windowState);
-      if (result.success) {
-        meta.groupId = result.groupId;
-        meta.isSpecialGroup = true;
-      }
-    } else if (t.newStatus === STATUS.RED && meta.isSpecialGroup && getSpecialGroupType(meta.groupId, meta.windowId, windowState) === 'yellow') {
-      const result = await moveTabToSpecialGroup(Number(tabId), 'red', meta.windowId, windowState);
-      if (result.success) {
-        meta.groupId = result.groupId;
-        meta.isSpecialGroup = true;
-      }
-    }
-  }
-
-  // Clean up empty special groups
-  for (const wid of windowsAffected) {
-    await removeSpecialGroupIfEmpty(wid, 'yellow', windowState);
-    await removeSpecialGroupIfEmpty(wid, 'red', windowState);
-  }
-
   // Close gone groups and clean up groupZones
   const allWindows = new Set(Object.values(tabMeta).map((m) => m.windowId));
-  for (const wid of windowsAffected) allWindows.add(wid);
   // Ensure windows with gone groups are included (their tabs are already deleted from tabMeta)
   for (const wid of goneGroupWindowMap.values()) allWindows.add(wid);
 
@@ -397,8 +365,9 @@ async function _runEvaluationCycleInner(cid) {
     // Dissolve unnamed single-tab groups
     await dissolveUnnamedSingleTabGroups(wid, tabMeta, windowState);
 
-    // Sort groups into zones and update colors
-    await sortGroupsIntoZones(wid, tabMeta, windowState, currentActiveTime, settings);
+    // Unified sort: reads browser state, moves ungrouped tabs to special
+    // groups as needed, then sorts all groups into zone order
+    await sortTabsAndGroups(wid, tabMeta, windowState);
 
     // Update group titles with age if enabled
     const showGroupAge = settings.showGroupAge !== undefined
@@ -569,17 +538,28 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-chrome.webNavigation.onCommitted.addListener(async (details) => {
-  if (details.frameId !== 0) return;
+// Per-tab debounce: avoid double-processing when both onCommitted and
+// onHistoryStateUpdated fire for the same tab within a short window.
+const NAV_DEBOUNCE_MS = 1000;
+const _lastNavHandled = new Map();
+
+async function _handleNavigationEvent(tabId, source) {
+  const now = Date.now();
+  const last = _lastNavHandled.get(tabId) || 0;
+  if (now - last < NAV_DEBOUNCE_MS) {
+    logger.debug('Navigation debounced', { tabId, source, sinceLast: now - last });
+    return;
+  }
+  _lastNavHandled.set(tabId, now);
 
   const cid = logger.correlationId();
   try {
     // Skip navigations caused by Chrome restoring a suspended/discarded tab.
     // The tab was not actively navigated by the user — its age should not reset.
     try {
-      const tab = await chrome.tabs.get(details.tabId);
+      const tab = await chrome.tabs.get(tabId);
       if (tab.discarded || tab.status === 'unloaded') {
-        logger.debug('Ignoring navigation for discarded/suspended tab', { tabId: details.tabId }, cid);
+        logger.debug('Ignoring navigation for discarded/suspended tab', { tabId, source }, cid);
         return;
       }
     } catch { /* tab gone — will be caught below */ }
@@ -587,14 +567,14 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
-    const existing = tabMeta[details.tabId] || tabMeta[String(details.tabId)];
+    const existing = tabMeta[tabId] || tabMeta[String(tabId)];
     if (!existing) {
-      logger.debug('Navigation for untracked tab, skipping', { tabId: details.tabId }, cid);
+      logger.debug('Navigation for untracked tab, skipping', { tabId, source }, cid);
       return;
     }
     const currentActiveTime = await getCurrentActiveTime();
     const updated = handleNavigation(existing, currentActiveTime);
-    tabMeta[details.tabId] = updated;
+    tabMeta[tabId] = updated;
 
     // Determine if the tab is in a special group.  Check both stored meta
     // AND the live Chrome group (the stored flag can be stale).
@@ -604,7 +584,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
     if (!inSpecialGroup) {
       // Fallback: query the live Chrome tab to get its current groupId
       try {
-        const liveTab = await chrome.tabs.get(details.tabId);
+        const liveTab = await chrome.tabs.get(tabId);
         const liveGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
           ? liveTab.groupId : null;
         if (liveGroupId !== null && isSpecialGroup(liveGroupId, liveTab.windowId, windowState)) {
@@ -619,17 +599,17 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
     // FR-024: If tab was in a special group, ungroup it (navigating resets to green)
     if (inSpecialGroup) {
-      await ungroupTab(details.tabId);
+      await ungroupTab(tabId);
       updated.groupId = null;
       updated.isSpecialGroup = false;
-      tabMeta[details.tabId] = updated;
+      tabMeta[tabId] = updated;
 
       // Move ungrouped tab to the green zone (leftmost position)
       try {
-        await chrome.tabs.move(details.tabId, { index: 0 });
+        await chrome.tabs.move(tabId, { index: 0 });
       } catch (moveErr) {
         logger.warn('Failed to move ungrouped tab to green zone', {
-          tabId: details.tabId,
+          tabId,
           error: moveErr.message,
         }, cid);
       }
@@ -641,7 +621,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
       }
 
       logger.debug('Tab navigated out of special group', {
-        tabId: details.tabId, specialGroupId, windowId: existing.windowId,
+        tabId, specialGroupId, windowId: existing.windowId,
       }, cid);
     }
 
@@ -655,13 +635,25 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
         await updateGroupColor(groupId, groupStatus);
       }
     }
-    await sortGroupsIntoZones(existing.windowId, tabMeta, windowState);
+    await sortTabsAndGroups(existing.windowId, tabMeta, windowState);
 
     await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
-    logger.debug('Navigation committed, refresh time reset', { tabId: details.tabId }, cid);
+    logger.debug('Navigation handled, refresh time reset', { tabId, source }, cid);
   } catch (err) {
-    logger.error('onCommitted handler failed', { tabId: details.tabId, error: err.message }, cid);
+    logger.error('Navigation handler failed', { tabId, source, error: err.message }, cid);
   }
+}
+
+chrome.webNavigation.onCommitted.addListener(async (details) => {
+  if (details.frameId !== 0) return;
+  await _handleNavigationEvent(details.tabId, 'onCommitted');
+});
+
+// Catch SPA navigations (pushState / replaceState) that don't trigger onCommitted.
+// Sites like Reddit, YouTube, Twitter, etc. use the History API for in-page navigation.
+chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
+  if (details.frameId !== 0) return;
+  await _handleNavigationEvent(details.tabId, 'onHistoryStateUpdated');
 });
 
 // ─── Window Focus ────────────────────────────────────────────────────────────

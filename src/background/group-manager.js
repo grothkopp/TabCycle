@@ -282,32 +282,140 @@ export async function closeGoneGroups(windowId, goneGroupIds, tabMeta, windowSta
 
 const ZONE_RANK = { green: 0, yellow: 1, red: 2 };
 
-export async function sortGroupsIntoZones(windowId, tabMeta, windowState, activeTimeMs, settings) {
+/**
+ * Unified sort: reads live browser state, sorts an internal model, then
+ * applies the minimal set of moves to make the browser match.
+ *
+ * 1. Ungrouped tabs: if status ≠ zone → move to special group (yellow/red)
+ *    or leave to the right of the green zone.  If status = zone → skip.
+ * 2. Groups: compute each group's status, build desired order, compare
+ *    to actual order, move only when they differ.
+ */
+export async function sortTabsAndGroups(windowId, tabMeta, windowState) {
   const ws = ensureWindowState(windowId, windowState);
-  let moved = 0;
+  const result = { tabsMoved: 0, groupsMoved: 0 };
 
   try {
-    // groups come back in current visual order (left → right)
-    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    // ── 1. Read current browser state ──────────────────────────────────
+    const [chromeTabs, chromeGroups] = await Promise.all([
+      chrome.tabs.query({ windowId: Number(windowId) }),
+      chrome.tabGroups.query({ windowId: Number(windowId) }),
+    ]);
 
-    logger.debug('Raw tabGroups.query result', {
+    // Build lookup: tabId → chrome tab (for position info)
+    const chromeTabMap = new Map();
+    for (const ct of chromeTabs) chromeTabMap.set(ct.id, ct);
+
+    // Identify special group IDs
+    const specialGroupIds = new Set();
+    for (const g of chromeGroups) {
+      if (isSpecialGroup(g.id, windowId, windowState)) specialGroupIds.add(g.id);
+    }
+
+    logger.debug('sortTabsAndGroups: browser state read', {
       windowId,
-      groups: groups.map((g) => ({ id: g.id, title: g.title, color: g.color, collapsed: g.collapsed })),
+      tabCount: chromeTabs.length,
+      groupCount: chromeGroups.length,
+      specialGroupIds: [...specialGroupIds],
     });
 
-    // Separate user groups from special groups
-    const userGroups = [];
-    const specialGroupIds = new Set();
-    for (const g of groups) {
-      if (isSpecialGroup(g.id, windowId, windowState)) {
-        specialGroupIds.add(g.id);
-      } else {
-        userGroups.push(g);
+    // ── 2. Sort ungrouped tabs ─────────────────────────────────────────
+    // Collect unpinned, ungrouped tabs that we track
+    for (const ct of chromeTabs) {
+      if (ct.pinned) continue;
+      const meta = tabMeta[ct.id] || tabMeta[String(ct.id)];
+      if (!meta) continue;
+
+      const actualGroupId = ct.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? ct.groupId : null;
+      const inSpecial = actualGroupId !== null && specialGroupIds.has(actualGroupId);
+      const inUserGroup = actualGroupId !== null && !inSpecial;
+
+      // Skip tabs in user groups — they are sorted as part of group sorting
+      if (inUserGroup) continue;
+
+      // Determine what zone the tab is currently in
+      let currentZone = 'green'; // ungrouped = green zone
+      if (inSpecial) {
+        const sgType = getSpecialGroupType(actualGroupId, windowId, windowState);
+        if (sgType === SPECIAL_GROUP_TYPES.YELLOW) currentZone = 'yellow';
+        else if (sgType === SPECIAL_GROUP_TYPES.RED) currentZone = 'red';
+      }
+
+      const desiredZone = meta.status; // green, yellow, or red
+
+      // If status matches zone → don't sort it
+      if (currentZone === desiredZone) continue;
+
+      // Status differs from zone → move according to rules
+      if (desiredZone === 'yellow') {
+        // Move to yellow special group
+        const moveResult = await moveTabToSpecialGroup(ct.id, 'yellow', windowId, windowState);
+        if (moveResult.success) {
+          meta.groupId = moveResult.groupId;
+          meta.isSpecialGroup = true;
+          result.tabsMoved++;
+          // Refresh specialGroupIds in case a new group was created
+          if (!specialGroupIds.has(moveResult.groupId)) specialGroupIds.add(moveResult.groupId);
+        }
+      } else if (desiredZone === 'red') {
+        // Move to red special group (from yellow special or ungrouped)
+        const moveResult = await moveTabToSpecialGroup(ct.id, 'red', windowId, windowState);
+        if (moveResult.success) {
+          meta.groupId = moveResult.groupId;
+          meta.isSpecialGroup = true;
+          result.tabsMoved++;
+          if (!specialGroupIds.has(moveResult.groupId)) specialGroupIds.add(moveResult.groupId);
+        }
+      } else if (desiredZone === 'green' && inSpecial) {
+        // Tab became green but is still in a special group → ungroup
+        const ungrouped = await ungroupTab(ct.id);
+        if (ungrouped) {
+          meta.groupId = null;
+          meta.isSpecialGroup = false;
+          result.tabsMoved++;
+        }
       }
     }
 
-    // Compute the current zone for every user group
-    const statusMap = new Map(); // groupId → zone string
+    // Clean up empty special groups only if we moved tabs out of them
+    if (result.tabsMoved > 0) {
+      await removeSpecialGroupIfEmpty(windowId, 'yellow', windowState);
+      await removeSpecialGroupIfEmpty(windowId, 'red', windowState);
+    }
+
+    // ── 3. Sort groups ─────────────────────────────────────────────────
+    // Re-read groups after tab moves may have created/emptied groups
+    const groupsAfter = await chrome.tabGroups.query({ windowId: Number(windowId) });
+
+    // Refresh special group set — also re-discover by title/color if
+    // the windowState reference was lost (e.g. after service worker restart)
+    const specialAfter = new Set();
+    for (const g of groupsAfter) {
+      if (isSpecialGroup(g.id, windowId, windowState)) {
+        specialAfter.add(g.id);
+      } else if (g.title === 'Yellow' && g.color === 'yellow' && ws.specialGroups.yellow === null) {
+        // Re-register orphaned Yellow special group
+        ws.specialGroups.yellow = g.id;
+        specialAfter.add(g.id);
+        logger.info('Re-discovered orphaned Yellow special group', { windowId, groupId: g.id });
+      } else if (g.title === 'Red' && g.color === 'red' && ws.specialGroups.red === null) {
+        // Re-register orphaned Red special group
+        ws.specialGroups.red = g.id;
+        specialAfter.add(g.id);
+        logger.info('Re-discovered orphaned Red special group', { windowId, groupId: g.id });
+      }
+    }
+
+    const userGroups = [];
+    for (const g of groupsAfter) {
+      if (!specialAfter.has(g.id)) userGroups.push(g);
+    }
+
+    // Snapshot previous zones BEFORE overwriting
+    const prevZones = { ...ws.groupZones };
+
+    // Compute status for every user group
+    const statusMap = new Map();
     for (const group of userGroups) {
       const status = computeGroupStatus(group.id, tabMeta);
       if (!status) continue;
@@ -315,18 +423,42 @@ export async function sortGroupsIntoZones(windowId, tabMeta, windowState, active
       ws.groupZones[group.id] = status;
     }
 
-    // Only consider groups that have a computed status
     const ordered = userGroups.filter((g) => statusMap.has(g.id));
 
-    // Build the desired order: stable-sort user groups by zone rank,
-    // then insert special groups at their zone boundaries.
-    // Within each zone the original visual order (from Chrome query) is kept.
-    const sortedUser = [...ordered].sort((a, b) => {
-      return ZONE_RANK[statusMap.get(a.id)] - ZONE_RANK[statusMap.get(b.id)];
-    });
+    // Detect which groups just transitioned into a new zone
+    const justArrived = new Set();
+    for (const g of ordered) {
+      const cur = statusMap.get(g.id);
+      const prev = prevZones[g.id] || prevZones[String(g.id)];
+      if (prev !== undefined && prev !== cur) {
+        justArrived.add(g.id);
+      }
+    }
 
-    // Insert special groups: Yellow at the start of the yellow zone,
-    // Red at the start of the red zone (FR-013, FR-014).
+    // Build sorted list per zone.  Within each zone:
+    //   - newly arrived groups go to the LEFT (inserted first)
+    //   - groups already in the zone keep their Chrome visual order
+    // For green: newly refreshed → leftmost of ALL groups
+    // For yellow/red: newly arrived → left of zone (right of special group)
+    const greenGroups = ordered.filter((g) => statusMap.get(g.id) === 'green');
+    const yellowGroups = ordered.filter((g) => statusMap.get(g.id) === 'yellow');
+    const redGroups = ordered.filter((g) => statusMap.get(g.id) === 'red');
+
+    const sortWithNewFirst = (groups) => {
+      const arrived = groups.filter((g) => justArrived.has(g.id));
+      const staying = groups.filter((g) => !justArrived.has(g.id));
+      return [...arrived, ...staying];
+    };
+
+    const sortedUser = [
+      ...sortWithNewFirst(greenGroups),
+      ...sortWithNewFirst(yellowGroups),
+      ...sortWithNewFirst(redGroups),
+    ];
+
+    // Insert special groups at zone boundaries:
+    // Yellow special at the start of the yellow zone,
+    // Red special at the start of the red zone.
     const desired = [];
     const yellowSpecialId = ws.specialGroups.yellow;
     const redSpecialId = ws.specialGroups.red;
@@ -335,45 +467,48 @@ export async function sortGroupsIntoZones(windowId, tabMeta, windowState, active
 
     for (const g of sortedUser) {
       const zone = statusMap.get(g.id);
-      // Insert special Yellow before the first yellow-or-later user group
-      if (!yellowInserted && yellowSpecialId !== null && specialGroupIds.has(yellowSpecialId)
+      if (!yellowInserted && yellowSpecialId !== null && specialAfter.has(yellowSpecialId)
           && ZONE_RANK[zone] >= ZONE_RANK.yellow) {
         desired.push({ id: yellowSpecialId, _special: true });
         yellowInserted = true;
       }
-      // Insert special Red before the first red user group
-      if (!redInserted && redSpecialId !== null && specialGroupIds.has(redSpecialId)
+      if (!redInserted && redSpecialId !== null && specialAfter.has(redSpecialId)
           && ZONE_RANK[zone] >= ZONE_RANK.red) {
         desired.push({ id: redSpecialId, _special: true });
         redInserted = true;
       }
       desired.push(g);
     }
-    // Append special groups at the end if their zone has no user groups
-    if (!yellowInserted && yellowSpecialId !== null && specialGroupIds.has(yellowSpecialId)) {
+    if (!yellowInserted && yellowSpecialId !== null && specialAfter.has(yellowSpecialId)) {
       desired.push({ id: yellowSpecialId, _special: true });
-      yellowInserted = true;
     }
-    if (!redInserted && redSpecialId !== null && specialGroupIds.has(redSpecialId)) {
+    if (!redInserted && redSpecialId !== null && specialAfter.has(redSpecialId)) {
       desired.push({ id: redSpecialId, _special: true });
     }
 
-    // Build the current order including special groups
-    const allOrdered = groups.filter((g) =>
-      statusMap.has(g.id) || specialGroupIds.has(g.id)
+    // Compare current order to desired order
+    const allOrdered = groupsAfter.filter((g) =>
+      statusMap.has(g.id) || specialAfter.has(g.id)
     );
     const currentIds = allOrdered.map((g) => g.id);
     const desiredIds = desired.map((g) => g.id);
 
-    // If order differs, move all groups in desired order to index:-1.
-    // Each move appends to the end, so processing in desired order
-    // produces the correct final sequence.  Group count is small (<10
-    // typically) so moving all is fine and avoids partial-move bugs.
+    logger.info('sortTabsAndGroups: group order comparison', {
+      windowId,
+      currentIds,
+      desiredIds,
+      specialGroups: { yellow: ws.specialGroups.yellow, red: ws.specialGroups.red },
+      specialAfter: [...specialAfter],
+      userGroupStatuses: Object.fromEntries(statusMap),
+      groupsAfterIds: groupsAfter.map((g) => g.id),
+      needsMove: currentIds.join(',') !== desiredIds.join(','),
+    });
+
     if (currentIds.join(',') !== desiredIds.join(',')) {
       for (const g of desired) {
         try {
           await chrome.tabGroups.move(g.id, { index: -1 });
-          moved++;
+          result.groupsMoved++;
         } catch (err) {
           logger.warn('Failed to move group to zone', {
             groupId: g.id, zone: g._special ? 'special' : statusMap.get(g.id),
@@ -391,35 +526,21 @@ export async function sortGroupsIntoZones(windowId, tabMeta, windowState, active
       }
     }
 
-    // Diagnostic: log all group ages for this window, sorted by age descending
-    if (activeTimeMs !== undefined && settings) {
-      const groupDiag = ordered.map((g) => {
-        const tabCount = Object.values(tabMeta).filter(
-          (m) => m.groupId === g.id && !m.pinned && !m.isSpecialGroup
-        ).length;
-        const age = computeGroupAge(g.id, tabMeta, activeTimeMs, settings);
-        return {
-          groupId: g.id,
-          title: stripAgeSuffix(g.title) || '(unnamed)',
-          chromeColor: g.color,
-          computedStatus: statusMap.get(g.id),
-          ageMs: age,
-          ageFormatted: formatAge(age),
-          tabCount,
-        };
-      });
-      groupDiag.sort((a, b) => b.ageMs - a.ageMs);
-      logger.info('Group age report', { windowId, groups: groupDiag });
-    }
+    logger.debug('sortTabsAndGroups: complete', {
+      windowId,
+      tabsMoved: result.tabsMoved,
+      groupsMoved: result.groupsMoved,
+      desiredGroupOrder: desiredIds,
+    });
   } catch (err) {
-    logger.error('Failed to sort groups into zones', {
+    logger.error('Failed to sort tabs and groups', {
       windowId,
       error: err.message,
       errorCode: ERROR_CODES.ERR_GROUP_MOVE,
     });
   }
 
-  return { moved };
+  return result;
 }
 
 /**
