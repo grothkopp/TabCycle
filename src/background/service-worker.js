@@ -32,6 +32,8 @@ const logger = createLogger('background');
 
 // Guard: suppress reactive event handlers while the evaluation cycle owns state
 let evaluationCycleRunning = false;
+let evaluationCycleStartedAt = 0;
+const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
 // ─── Installation ────────────────────────────────────────────────────────────
 
@@ -112,7 +114,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 async function runEvaluationCycle(cid) {
+  if (evaluationCycleRunning) {
+    const elapsed = Date.now() - evaluationCycleStartedAt;
+    if (elapsed < EVALUATION_CYCLE_TIMEOUT_MS) {
+      logger.debug('Evaluation cycle already running, skipping', { elapsedMs: elapsed }, cid);
+      return;
+    }
+    logger.warn('Evaluation cycle guard timed out, resetting', { elapsedMs: elapsed }, cid);
+  }
   evaluationCycleRunning = true;
+  evaluationCycleStartedAt = Date.now();
   try {
     await _runEvaluationCycleInner(cid);
   } finally {
@@ -148,7 +159,7 @@ async function _runEvaluationCycleInner(cid) {
   const transitions = evaluateAllTabs(tabMeta, currentActiveTime, settings);
   const transitionCount = Object.keys(transitions).length;
 
-  // Close tabs that reached GONE
+  // Separate gone tabs from other transitions
   const goneTabIds = [];
   for (const [tabId, t] of Object.entries(transitions)) {
     if (t.newStatus === STATUS.GONE) {
@@ -158,7 +169,7 @@ async function _runEvaluationCycleInner(cid) {
     }
   }
 
-  // Bookmark individual gone tabs before removal (FR-001, FR-004, FR-012, FR-017)
+  // Resolve bookmark folder once if bookmarking is enabled and there are gone tabs
   const bookmarkEnabled = settings.bookmarkEnabled !== undefined
     ? settings.bookmarkEnabled
     : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
@@ -166,19 +177,106 @@ async function _runEvaluationCycleInner(cid) {
 
   if (bookmarkEnabled && goneTabIds.length > 0) {
     bookmarkFolderId = await resolveBookmarkFolder(settings);
+    logger.debug('Bookmark folder resolved', { bookmarkFolderId, bookmarkEnabled }, cid);
   }
 
+  // ── Identify gone groups BEFORE removing any tabs ──────────────────
+  // We must do this now while the tabs and groups still exist in Chrome,
+  // so that chrome.tabGroups.get() and chrome.tabs.query() can retrieve
+  // group info and tab URLs for bookmarking.
+  const goneGroupIds = [];          // group IDs whose every tab is gone
+  const goneGroupTabIds = new Set(); // tab IDs that belong to a gone group
+
+  // Collect all user-group IDs that have at least one gone tab
+  const candidateGroupIds = new Set();
+  for (const tabId of goneTabIds) {
+    const meta = tabMeta[tabId] || tabMeta[String(tabId)];
+    if (meta && meta.groupId !== null && !meta.isSpecialGroup) {
+      candidateGroupIds.add(meta.groupId);
+    }
+  }
+
+  // A group is "gone" when ALL its non-pinned tabs are gone
+  for (const gid of candidateGroupIds) {
+    const allTabsInGroup = Object.values(tabMeta).filter(
+      (m) => m.groupId === gid && !m.pinned && !m.isSpecialGroup
+    );
+    const allGone = allTabsInGroup.length > 0 && allTabsInGroup.every(
+      (m) => goneTabIds.includes(m.tabId)
+    );
+    if (allGone) {
+      goneGroupIds.push(gid);
+      for (const m of allTabsInGroup) goneGroupTabIds.add(m.tabId);
+    }
+  }
+
+  // Capture window ID for each gone group while tabMeta still has the tabs
+  const goneGroupWindowMap = new Map(); // groupId → windowId
+  for (const gid of goneGroupIds) {
+    const sample = Object.values(tabMeta).find(
+      (m) => m.groupId === gid && !m.pinned && !m.isSpecialGroup
+    );
+    if (sample) goneGroupWindowMap.set(gid, sample.windowId);
+  }
+
+  logger.debug('Gone analysis', {
+    goneTabCount: goneTabIds.length,
+    goneGroupCount: goneGroupIds.length,
+    goneGroupTabCount: goneGroupTabIds.size,
+    goneGroupIds,
+  }, cid);
+
+  // ── Bookmark gone GROUPS first (tabs still exist in Chrome) ────────
+  const bookmarkedGroupIds = new Set(); // dedup guard
+  if (bookmarkEnabled && bookmarkFolderId && goneGroupIds.length > 0) {
+    for (const gid of goneGroupIds) {
+      if (bookmarkedGroupIds.has(gid)) {
+        logger.warn('Skipping duplicate group bookmark', { groupId: gid }, cid);
+        continue;
+      }
+      try {
+        const groupInfo = await chrome.tabGroups.get(gid);
+        const groupTabs = await chrome.tabs.query({ groupId: gid });
+        logger.debug('Bookmarking gone group', {
+          groupId: gid,
+          groupTitle: groupInfo.title || '(unnamed)',
+          tabCount: groupTabs.length,
+          tabUrls: groupTabs.map((t) => t.url),
+        }, cid);
+        const result = await bookmarkGroupTabs(groupInfo.title, groupTabs, bookmarkFolderId);
+        bookmarkedGroupIds.add(gid);
+        logger.info('Bookmarked gone group', {
+          groupId: gid,
+          groupTitle: groupInfo.title || '(unnamed)',
+          tabsCreated: result.created,
+          tabsSkipped: result.skipped,
+          tabsFailed: result.failed,
+        }, cid);
+      } catch (err) {
+        logger.warn('Failed to bookmark gone group', {
+          groupId: gid,
+          error: err.message,
+          errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
+        }, cid);
+      }
+    }
+  }
+
+  // ── Bookmark individual gone tabs (not part of a gone group) ───────
   let bookmarksCreated = 0;
   let bookmarksSkipped = 0;
 
   for (const tabId of goneTabIds) {
-    // Bookmark before removal — tab info must be captured first
+    // Skip tabs already bookmarked as part of a gone group
+    if (goneGroupTabIds.has(tabId)) continue;
+
     if (bookmarkEnabled && bookmarkFolderId) {
       try {
         const tab = await chrome.tabs.get(tabId);
         if (isBookmarkableUrl(tab.url)) {
           await bookmarkTab(tab, bookmarkFolderId);
           bookmarksCreated++;
+          logger.debug('Bookmarked individual gone tab', { tabId, url: tab.url }, cid);
         } else {
           bookmarksSkipped++;
           logger.debug('Skipped bookmarking tab with blocklisted URL', { tabId, url: tab.url }, cid);
@@ -187,7 +285,10 @@ async function _runEvaluationCycleInner(cid) {
         logger.warn('Failed to bookmark gone tab', { tabId, error: err.message, errorCode: ERROR_CODES.ERR_BOOKMARK_CREATE }, cid);
       }
     }
+  }
 
+  // ── Remove all gone tabs and close gone groups ─────────────────────
+  for (const tabId of goneTabIds) {
     try {
       await chrome.tabs.remove(tabId);
     } catch (err) {
@@ -226,49 +327,35 @@ async function _runEvaluationCycleInner(cid) {
     await removeSpecialGroupIfEmpty(wid, 'red', windowState);
   }
 
-  // Identify user-created groups that reached GONE status and close them
+  // Close gone groups and clean up groupZones
   const allWindows = new Set(Object.values(tabMeta).map((m) => m.windowId));
   for (const wid of windowsAffected) allWindows.add(wid);
+  // Ensure windows with gone groups are included (their tabs are already deleted from tabMeta)
+  for (const wid of goneGroupWindowMap.values()) allWindows.add(wid);
 
   for (const wid of allWindows) {
-    // Find gone groups: user groups where ALL tabs are gone
-    const groupIds = new Set();
+    // Gone groups for this window (identified before tab removal)
+    const windowGoneGroupIds = goneGroupIds.filter(
+      (gid) => goneGroupWindowMap.get(gid) === Number(wid)
+    );
+
+    // Also find groups that lost all tabs for other reasons (e.g. manual removal)
+    const remainingGroupIds = new Set();
     for (const m of Object.values(tabMeta)) {
       if (m.windowId === Number(wid) && m.groupId !== null && !m.isSpecialGroup) {
-        groupIds.add(m.groupId);
+        remainingGroupIds.add(m.groupId);
       }
     }
-    const goneGroupIds = [];
-    for (const gid of groupIds) {
+    const emptyGroupIds = [];
+    for (const gid of remainingGroupIds) {
       const status = computeGroupStatus(gid, tabMeta);
-      if (status === null) goneGroupIds.push(gid); // no non-pinned tabs left
+      if (status === null) emptyGroupIds.push(gid);
     }
-    if (goneGroupIds.length > 0) {
-      // Bookmark gone groups before closing them (FR-002, FR-003, FR-012)
-      if (bookmarkEnabled && bookmarkFolderId) {
-        for (const gid of goneGroupIds) {
-          try {
-            const groupInfo = await chrome.tabGroups.get(gid);
-            const groupTabs = await chrome.tabs.query({ groupId: gid });
-            const result = await bookmarkGroupTabs(groupInfo.title, groupTabs, bookmarkFolderId);
-            logger.info('Bookmarked gone group', {
-              groupId: gid,
-              groupTitle: groupInfo.title || '(unnamed)',
-              tabsCreated: result.created,
-              tabsSkipped: result.skipped,
-              tabsFailed: result.failed,
-            }, cid);
-          } catch (err) {
-            logger.warn('Failed to bookmark gone group', {
-              groupId: gid,
-              error: err.message,
-              errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
-            }, cid);
-          }
-        }
-      }
 
-      const closedIds = await closeGoneGroups(wid, goneGroupIds, tabMeta, windowState);
+    const allGoneGroupIds = [...new Set([...windowGoneGroupIds, ...emptyGroupIds])];
+
+    if (allGoneGroupIds.length > 0) {
+      const closedIds = await closeGoneGroups(wid, allGoneGroupIds, tabMeta, windowState);
       for (const id of closedIds) {
         delete tabMeta[id];
         delete tabMeta[String(id)];
