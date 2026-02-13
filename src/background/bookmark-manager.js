@@ -1,4 +1,5 @@
 import { STORAGE_KEYS, BOOKMARK_BLOCKED_URLS, DEFAULT_BOOKMARK_SETTINGS, ERROR_CODES } from '../shared/constants.js';
+import { stripAgeSuffix } from './group-manager.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('background');
@@ -159,7 +160,8 @@ export async function bookmarkTab(tab, parentId) {
  */
 export async function bookmarkGroupTabs(groupTitle, tabs, parentId) {
   const cid = logger.correlationId();
-  const subfolderName = groupTitle && groupTitle.trim() ? groupTitle : '(unnamed)';
+  const cleanTitle = stripAgeSuffix(groupTitle);
+  const subfolderName = cleanTitle && cleanTitle.trim() ? cleanTitle : '(unnamed)';
   const result = { created: 0, skipped: 0, failed: 0 };
 
   try {

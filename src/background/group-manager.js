@@ -1,4 +1,5 @@
 import { SPECIAL_GROUP_TYPES, ERROR_CODES } from '../shared/constants.js';
+import { computeAge } from './status-evaluator.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('background');
@@ -278,62 +279,131 @@ export async function closeGoneGroups(windowId, goneGroupIds, tabMeta, windowSta
   return closedTabIds;
 }
 
-export async function sortGroupsIntoZones(windowId, tabMeta, windowState) {
+const ZONE_RANK = { green: 0, yellow: 1, red: 2 };
+
+export async function sortGroupsIntoZones(windowId, tabMeta, windowState, activeTimeMs, settings) {
   const ws = ensureWindowState(windowId, windowState);
   let moved = 0;
 
   try {
+    // groups come back in current visual order (left → right)
     const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
-    const userGroups = groups.filter((g) => !isSpecialGroup(g.id, windowId, windowState));
 
-    const greenGroups = [];
-    const yellowGroups = [];
-    const redGroups = [];
+    // Separate user groups from special groups
+    const userGroups = [];
+    const specialGroupIds = new Set();
+    for (const g of groups) {
+      if (isSpecialGroup(g.id, windowId, windowState)) {
+        specialGroupIds.add(g.id);
+      } else {
+        userGroups.push(g);
+      }
+    }
 
+    // Compute the current zone for every user group
+    const statusMap = new Map(); // groupId → zone string
     for (const group of userGroups) {
       const status = computeGroupStatus(group.id, tabMeta);
       if (!status) continue;
-
-      const previousZone = ws.groupZones[group.id] || ws.groupZones[String(group.id)];
+      statusMap.set(group.id, status);
       ws.groupZones[group.id] = status;
-
-      if (status === 'green') greenGroups.push({ group, previousZone });
-      else if (status === 'yellow') yellowGroups.push({ group, previousZone });
-      else if (status === 'red') redGroups.push({ group, previousZone });
     }
 
-    // Only move groups that changed zones
-    const zoneOrder = [...greenGroups, ...yellowGroups, ...redGroups];
-    let targetIndex = -1; // chrome will place after pinned tabs
+    // Only consider groups that have a computed status
+    const ordered = userGroups.filter((g) => statusMap.has(g.id));
 
-    for (const { group, previousZone } of zoneOrder) {
-      const currentZone = ws.groupZones[group.id];
-      if (previousZone && previousZone === currentZone) {
-        continue; // same zone, preserve order
+    // Build the desired order: stable-sort user groups by zone rank,
+    // then insert special groups at their zone boundaries.
+    // Within each zone the original visual order (from Chrome query) is kept.
+    const sortedUser = [...ordered].sort((a, b) => {
+      return ZONE_RANK[statusMap.get(a.id)] - ZONE_RANK[statusMap.get(b.id)];
+    });
+
+    // Insert special groups: Yellow at the start of the yellow zone,
+    // Red at the start of the red zone (FR-013, FR-014).
+    const desired = [];
+    const yellowSpecialId = ws.specialGroups.yellow;
+    const redSpecialId = ws.specialGroups.red;
+    let yellowInserted = false;
+    let redInserted = false;
+
+    for (const g of sortedUser) {
+      const zone = statusMap.get(g.id);
+      // Insert special Yellow before the first yellow-or-later user group
+      if (!yellowInserted && yellowSpecialId !== null && specialGroupIds.has(yellowSpecialId)
+          && ZONE_RANK[zone] >= ZONE_RANK.yellow) {
+        desired.push({ id: yellowSpecialId, _special: true });
+        yellowInserted = true;
       }
+      // Insert special Red before the first red user group
+      if (!redInserted && redSpecialId !== null && specialGroupIds.has(redSpecialId)
+          && ZONE_RANK[zone] >= ZONE_RANK.red) {
+        desired.push({ id: redSpecialId, _special: true });
+        redInserted = true;
+      }
+      desired.push(g);
+    }
+    // Append special groups at the end if their zone has no user groups
+    if (!yellowInserted && yellowSpecialId !== null && specialGroupIds.has(yellowSpecialId)) {
+      desired.push({ id: yellowSpecialId, _special: true });
+      yellowInserted = true;
+    }
+    if (!redInserted && redSpecialId !== null && specialGroupIds.has(redSpecialId)) {
+      desired.push({ id: redSpecialId, _special: true });
+    }
 
-      try {
-        if (targetIndex >= 0) {
-          await chrome.tabGroups.move(group.id, { index: targetIndex });
+    // Build the current order including special groups
+    const allOrdered = groups.filter((g) =>
+      statusMap.has(g.id) || specialGroupIds.has(g.id)
+    );
+    const currentIds = allOrdered.map((g) => g.id);
+    const desiredIds = desired.map((g) => g.id);
+
+    // If order differs, move all groups in desired order to index:-1.
+    // Each move appends to the end, so processing in desired order
+    // produces the correct final sequence.  Group count is small (<10
+    // typically) so moving all is fine and avoids partial-move bugs.
+    if (currentIds.join(',') !== desiredIds.join(',')) {
+      for (const g of desired) {
+        try {
+          await chrome.tabGroups.move(g.id, { index: -1 });
+          moved++;
+        } catch (err) {
+          logger.warn('Failed to move group to zone', {
+            groupId: g.id, zone: g._special ? 'special' : statusMap.get(g.id),
+            error: err.message, errorCode: ERROR_CODES.ERR_GROUP_MOVE,
+          });
         }
-        moved++;
-      } catch (err) {
-        logger.warn('Failed to move group to zone', {
-          groupId: group.id,
-          zone: currentZone,
-          error: err.message,
-          errorCode: ERROR_CODES.ERR_GROUP_MOVE,
-        });
       }
-      targetIndex++;
     }
 
-    // Update colors for all user groups
-    for (const { group } of zoneOrder) {
-      const status = ws.groupZones[group.id];
-      if (status && group.color !== status) {
-        await updateGroupColor(group.id, status);
+    // Update colors for user groups only (never touch special group colors)
+    for (const g of ordered) {
+      const status = statusMap.get(g.id);
+      if (status && g.color !== status) {
+        await updateGroupColor(g.id, status);
       }
+    }
+
+    // Diagnostic: log all group ages for this window, sorted by age descending
+    if (activeTimeMs !== undefined && settings) {
+      const groupDiag = ordered.map((g) => {
+        const tabCount = Object.values(tabMeta).filter(
+          (m) => m.groupId === g.id && !m.pinned && !m.isSpecialGroup
+        ).length;
+        const age = computeGroupAge(g.id, tabMeta, activeTimeMs, settings);
+        return {
+          groupId: g.id,
+          title: stripAgeSuffix(g.title) || '(unnamed)',
+          chromeColor: g.color,
+          computedStatus: statusMap.get(g.id),
+          ageMs: age,
+          ageFormatted: formatAge(age),
+          tabCount,
+        };
+      });
+      groupDiag.sort((a, b) => b.ageMs - a.ageMs);
+      logger.info('Group age report', { windowId, groups: groupDiag });
     }
   } catch (err) {
     logger.error('Failed to sort groups into zones', {
@@ -403,6 +473,87 @@ export async function dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowSt
     });
   }
   return { dissolved };
+}
+
+// ─── Group Age Display ────────────────────────────────────────────────────────
+
+const AGE_SUFFIX_RE = /\s?\([0-9]+[mhd]\)$/;
+
+export function stripAgeSuffix(title) {
+  if (!title) return title;
+  return title.replace(AGE_SUFFIX_RE, '');
+}
+
+export function formatAge(ms) {
+  const totalMinutes = Math.floor(ms / 60000);
+  if (totalMinutes < 60) return `${Math.max(1, totalMinutes)}m`;
+  const totalHours = Math.floor(totalMinutes / 60);
+  if (totalHours < 24) return `${totalHours}h`;
+  const totalDays = Math.floor(totalHours / 24);
+  return `${totalDays}d`;
+}
+
+export function computeGroupAge(groupId, tabMeta, activeTimeMs, settings) {
+  let freshestAge = null;
+  for (const meta of Object.values(tabMeta)) {
+    if (meta.groupId !== groupId) continue;
+    if (meta.pinned) continue;
+    if (meta.isSpecialGroup) continue;
+    const age = computeAge(meta, activeTimeMs, settings);
+    if (freshestAge === null || age < freshestAge) freshestAge = age;
+  }
+  return freshestAge === null ? 0 : freshestAge;
+}
+
+export async function updateGroupTitlesWithAge(windowId, tabMeta, windowState, activeTimeMs, settings) {
+  let updated = 0;
+  try {
+    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+
+    for (const group of groups) {
+      if (isSpecialGroup(group.id, windowId, windowState)) continue;
+
+      const age = computeGroupAge(group.id, tabMeta, activeTimeMs, settings);
+      if (age === 0) continue;
+
+      const baseName = stripAgeSuffix(group.title) || '';
+      const ageSuffix = `(${formatAge(age)})`;
+      const newTitle = baseName ? `${baseName} ${ageSuffix}` : ageSuffix;
+
+      if (newTitle !== group.title) {
+        try {
+          await chrome.tabGroups.update(group.id, { title: newTitle });
+          updated++;
+        } catch (err) {
+          logger.warn('Failed to update group title with age', {
+            groupId: group.id,
+            error: err.message,
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.error('Failed to update group titles with age', {
+      windowId,
+      error: err.message,
+    });
+  }
+  return { updated };
+}
+
+export async function removeAgeSuffixFromAllGroups(windowId, windowState) {
+  try {
+    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    for (const group of groups) {
+      if (isSpecialGroup(group.id, windowId, windowState)) continue;
+      const baseName = stripAgeSuffix(group.title);
+      if (baseName !== group.title) {
+        try {
+          await chrome.tabGroups.update(group.id, { title: baseName });
+        } catch { /* best effort */ }
+      }
+    }
+  } catch { /* best effort */ }
 }
 
 export async function ungroupTab(tabId) {

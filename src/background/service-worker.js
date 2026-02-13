@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
 import { createTabEntry, handleNavigation, reconcileTabs } from './tab-tracker.js';
@@ -14,6 +14,8 @@ import {
   sortGroupsIntoZones,
   closeGoneGroups,
   dissolveUnnamedSingleTabGroups,
+  updateGroupTitlesWithAge,
+  removeAgeSuffixFromAllGroups,
 } from './group-manager.js';
 import { placeNewTab } from './tab-placer.js';
 import { resolveBookmarkFolder, isBookmarkableUrl, bookmarkTab, bookmarkGroupTabs } from './bookmark-manager.js';
@@ -27,6 +29,9 @@ import {
 } from './time-accumulator.js';
 
 const logger = createLogger('background');
+
+// Guard: suppress reactive event handlers while the evaluation cycle owns state
+let evaluationCycleRunning = false;
 
 // ─── Installation ────────────────────────────────────────────────────────────
 
@@ -62,7 +67,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await chrome.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MINUTES });
     logger.info('Alarm created', { name: ALARM_NAME, periodMinutes: ALARM_PERIOD_MINUTES }, cid);
 
-    await scanExistingTabs(cid);
+    if (details.reason === 'install') {
+      await scanExistingTabs(cid);
+    } else {
+      await reconcileState(cid);
+    }
   } catch (err) {
     logger.error('onInstalled handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, cid);
   }
@@ -103,6 +112,15 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 });
 
 async function runEvaluationCycle(cid) {
+  evaluationCycleRunning = true;
+  try {
+    await _runEvaluationCycleInner(cid);
+  } finally {
+    evaluationCycleRunning = false;
+  }
+}
+
+async function _runEvaluationCycleInner(cid) {
   await persistActiveTime();
 
   const state = await readState([
@@ -115,6 +133,17 @@ async function runEvaluationCycle(cid) {
   const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
   const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
   const currentActiveTime = await getCurrentActiveTime();
+
+  // Diagnostic: log active time state and settings for debugging age calculations
+  const activeTimeState = await getCachedActiveTimeState();
+  logger.info('Evaluation cycle start', {
+    timeMode: settings.timeMode,
+    currentActiveTimeMs: currentActiveTime,
+    accumulatedMs: activeTimeState.accumulatedMs,
+    focusStartTime: activeTimeState.focusStartTime,
+    thresholds: settings.thresholds,
+    tabCount: Object.keys(tabMeta).length,
+  }, cid);
 
   const transitions = evaluateAllTabs(tabMeta, currentActiveTime, settings);
   const transitionCount = Object.keys(transitions).length;
@@ -250,7 +279,17 @@ async function runEvaluationCycle(cid) {
     await dissolveUnnamedSingleTabGroups(wid, tabMeta, windowState);
 
     // Sort groups into zones and update colors
-    await sortGroupsIntoZones(wid, tabMeta, windowState);
+    await sortGroupsIntoZones(wid, tabMeta, windowState, currentActiveTime, settings);
+
+    // Update group titles with age if enabled
+    const showGroupAge = settings.showGroupAge !== undefined
+      ? settings.showGroupAge
+      : DEFAULT_SHOW_GROUP_AGE;
+    if (showGroupAge) {
+      await updateGroupTitlesWithAge(wid, tabMeta, windowState, currentActiveTime, settings);
+    } else {
+      await removeAgeSuffixFromAllGroups(wid, windowState);
+    }
   }
 
   await batchWrite({
@@ -305,6 +344,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
+  if (evaluationCycleRunning) return;
   const cid = logger.correlationId();
   try {
     if (removeInfo.isWindowClosing) {
@@ -340,50 +380,23 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const cid = logger.correlationId();
 
-  // DIAGNOSTIC: Log every onUpdated event with its changeInfo keys
-  logger.info('DIAG onUpdated fired', {
-    tabId,
-    changeInfoKeys: Object.keys(changeInfo),
-    groupId: changeInfo.groupId,
-    windowId: tab.windowId,
-  }, cid);
-
   // T041: Handle user manually moving tab to a different group
-  if (changeInfo.groupId !== undefined) {
+  // Skip if the evaluation cycle is running — it owns state and will persist it.
+  if (changeInfo.groupId !== undefined && !evaluationCycleRunning) {
     try {
-      // DIAGNOSTIC: Enumerate all groups and their tab counts
-      try {
-        const allGroups = await chrome.tabGroups.query({ windowId: tab.windowId });
-        for (const g of allGroups) {
-          const groupTabs = await chrome.tabs.query({ groupId: g.id });
-          logger.info('DIAG group snapshot', {
-            groupId: g.id,
-            title: g.title,
-            color: g.color,
-            tabCount: groupTabs.length,
-            tabIds: groupTabs.map(t => t.id),
-            isTracked: (await import('./group-manager.js')).isExtensionCreatedGroup(g.id),
-          }, cid);
-        }
-      } catch (diagErr) {
-        logger.warn('DIAG group enumeration failed', { error: diagErr.message }, cid);
-      }
-
       const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
       const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
       const meta = tabMeta[tabId] || tabMeta[String(tabId)];
+      const newGroupId = changeInfo.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? changeInfo.groupId : null;
       if (meta) {
-        const newGroupId = changeInfo.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? changeInfo.groupId : null;
+        const oldGroupId = meta.groupId;
         meta.groupId = newGroupId;
         meta.isSpecialGroup = newGroupId !== null && isSpecialGroup(newGroupId, tab.windowId, windowState);
-        logger.info('DIAG tab group changed', { tabId, newGroupId, hasMeta: true }, cid);
-      } else {
-        logger.info('DIAG tab group changed but no meta', { tabId, changeGroupId: changeInfo.groupId }, cid);
+        logger.debug('Tab group changed', { tabId, oldGroupId, newGroupId, windowId: tab.windowId }, cid);
       }
       // Dissolve any extension-created unnamed groups now left with a single tab
-      const result = await dissolveUnnamedSingleTabGroups(tab.windowId, tabMeta, windowState);
-      logger.info('DIAG dissolution result', { dissolved: result.dissolved, windowId: tab.windowId }, cid);
+      await dissolveUnnamedSingleTabGroups(tab.windowId, tabMeta, windowState);
       await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
     } catch (err) {
       logger.error('onUpdated groupId handler failed', { tabId, error: err.message }, cid);
@@ -412,6 +425,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // ─── Tab Moved (backup dissolution trigger) ─────────────────────────────────
 
 chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
+  if (evaluationCycleRunning) return;
   const cid = logger.correlationId();
   try {
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
@@ -434,8 +448,19 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 
   const cid = logger.correlationId();
   try {
-    const state = await readState([STORAGE_KEYS.TAB_META]);
+    // Skip navigations caused by Chrome restoring a suspended/discarded tab.
+    // The tab was not actively navigated by the user — its age should not reset.
+    try {
+      const tab = await chrome.tabs.get(details.tabId);
+      if (tab.discarded || tab.status === 'unloaded') {
+        logger.debug('Ignoring navigation for discarded/suspended tab', { tabId: details.tabId }, cid);
+        return;
+      }
+    } catch { /* tab gone — will be caught below */ }
+
+    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
+    const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
     const existing = tabMeta[details.tabId] || tabMeta[String(details.tabId)];
     if (!existing) {
       logger.debug('Navigation for untracked tab, skipping', { tabId: details.tabId }, cid);
@@ -444,26 +469,69 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
     const currentActiveTime = await getCurrentActiveTime();
     const updated = handleNavigation(existing, currentActiveTime);
     tabMeta[details.tabId] = updated;
-    // If tab was in a special group, ungroup it (navigating resets to green)
-    if (existing.isSpecialGroup && existing.groupId !== null) {
+
+    // Determine if the tab is in a special group.  Check both stored meta
+    // AND the live Chrome group (the stored flag can be stale).
+    let inSpecialGroup = existing.isSpecialGroup && existing.groupId !== null;
+    let specialGroupId = inSpecialGroup ? existing.groupId : null;
+
+    if (!inSpecialGroup) {
+      // Fallback: query the live Chrome tab to get its current groupId
+      try {
+        const liveTab = await chrome.tabs.get(details.tabId);
+        const liveGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+          ? liveTab.groupId : null;
+        if (liveGroupId !== null && isSpecialGroup(liveGroupId, liveTab.windowId, windowState)) {
+          inSpecialGroup = true;
+          specialGroupId = liveGroupId;
+          // Fix the stale meta
+          updated.groupId = liveGroupId;
+          updated.isSpecialGroup = true;
+        }
+      } catch { /* tab may have been removed */ }
+    }
+
+    // FR-024: If tab was in a special group, ungroup it (navigating resets to green)
+    if (inSpecialGroup) {
       await ungroupTab(details.tabId);
       updated.groupId = null;
       updated.isSpecialGroup = false;
       tabMeta[details.tabId] = updated;
 
-      // Clean up empty special group
-      const wsState = await readState([STORAGE_KEYS.WINDOW_STATE]);
-      const wState = wsState[STORAGE_KEYS.WINDOW_STATE] || {};
-      const groupType = getSpecialGroupType(existing.groupId, existing.windowId, wState);
-      if (groupType) {
-        await removeSpecialGroupIfEmpty(existing.windowId, groupType, wState);
-        await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: wState });
-      } else {
-        await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      // Move ungrouped tab to the green zone (leftmost position)
+      try {
+        await chrome.tabs.move(details.tabId, { index: 0 });
+      } catch (moveErr) {
+        logger.warn('Failed to move ungrouped tab to green zone', {
+          tabId: details.tabId,
+          error: moveErr.message,
+        }, cid);
       }
-    } else {
-      await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+
+      // Clean up empty special group (FR-015)
+      const groupType = getSpecialGroupType(specialGroupId, existing.windowId, windowState);
+      if (groupType) {
+        await removeSpecialGroupIfEmpty(existing.windowId, groupType, windowState);
+      }
+
+      logger.debug('Tab navigated out of special group', {
+        tabId: details.tabId, specialGroupId, windowId: existing.windowId,
+      }, cid);
     }
+
+    // For tabs in user groups: update group color and re-sort immediately.
+    // Double-check against windowState to never touch special group colors.
+    const groupId = updated.groupId;
+    if (groupId !== null && !updated.isSpecialGroup
+        && !isSpecialGroup(groupId, existing.windowId, windowState)) {
+      const groupStatus = computeGroupStatus(groupId, tabMeta);
+      if (groupStatus) {
+        await updateGroupColor(groupId, groupStatus);
+      }
+    }
+    await sortGroupsIntoZones(existing.windowId, tabMeta, windowState);
+
+    await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
     logger.debug('Navigation committed, refresh time reset', { tabId: details.tabId }, cid);
   } catch (err) {
     logger.error('onCommitted handler failed', { tabId: details.tabId, error: err.message }, cid);

@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, TIME_MODE, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('options');
@@ -74,6 +74,11 @@ async function loadSettings() {
     document.getElementById('redToGone').value = r2g.value;
     document.getElementById('redToGoneUnit').value = r2g.unit;
 
+    const showGroupAge = settings.showGroupAge !== undefined
+      ? settings.showGroupAge
+      : DEFAULT_SHOW_GROUP_AGE;
+    document.getElementById('showGroupAge').checked = showGroupAge;
+
     const bookmarkEnabled = settings.bookmarkEnabled !== undefined
       ? settings.bookmarkEnabled
       : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
@@ -140,6 +145,8 @@ async function saveSettings(event) {
     return;
   }
 
+  const showGroupAge = document.getElementById('showGroupAge').checked;
+
   const bookmarkEnabled = document.getElementById('bookmarkEnabled').checked;
   const bookmarkFolderName = document.getElementById('bookmarkFolderName').value.trim();
 
@@ -161,6 +168,7 @@ async function saveSettings(event) {
   const settings = {
     timeMode,
     thresholds: { greenToYellow, yellowToRed, redToGone },
+    showGroupAge,
     bookmarkEnabled,
     bookmarkFolderName,
   };
