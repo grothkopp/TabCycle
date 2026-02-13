@@ -35,6 +35,9 @@ let evaluationCycleRunning = false;
 let evaluationCycleStartedAt = 0;
 const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
+// Guard: suppress onUpdated groupId handler while placeNewTab is running
+let tabPlacementRunning = false;
+
 // ─── Installation ────────────────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(async (details) => {
@@ -74,6 +77,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     } else {
       await reconcileState(cid);
     }
+
+    await runEvaluationCycle(cid);
   } catch (err) {
     logger.error('onInstalled handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, cid);
   }
@@ -95,6 +100,8 @@ chrome.runtime.onStartup.addListener(async () => {
     }
 
     await reconcileState(cid);
+
+    await runEvaluationCycle(cid);
   } catch (err) {
     logger.error('onStartup handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_RECOVERY }, cid);
   }
@@ -106,10 +113,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name !== ALARM_NAME) return;
 
   const cid = logger.correlationId();
+  logger.debug('Alarm fired', { name: alarm.name }, cid);
   try {
     await runEvaluationCycle(cid);
   } catch (err) {
-    logger.error('Evaluation cycle failed', { error: err.message }, cid);
+    logger.error('Evaluation cycle failed', { error: err.message, stack: err.stack }, cid);
   }
 });
 
@@ -141,6 +149,10 @@ async function _runEvaluationCycleInner(cid) {
   ]);
 
   const settings = state[STORAGE_KEYS.SETTINGS];
+  if (!settings) {
+    logger.error('Settings missing from storage, skipping evaluation cycle. Reinstall extension or check storage.', {}, cid);
+    return;
+  }
   const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
   const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
   const currentActiveTime = await getCurrentActiveTime();
@@ -155,6 +167,26 @@ async function _runEvaluationCycleInner(cid) {
     thresholds: settings.thresholds,
     tabCount: Object.keys(tabMeta).length,
   }, cid);
+
+  // Reconcile groupId: fix stale tabMeta.groupId values by querying Chrome
+  let groupIdFixes = 0;
+  try {
+    const chromeTabs = await chrome.tabs.query({});
+    for (const ct of chromeTabs) {
+      const meta = tabMeta[ct.id] || tabMeta[String(ct.id)];
+      if (!meta) continue;
+      const actualGroupId = ct.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? ct.groupId : null;
+      if (meta.groupId !== actualGroupId) {
+        meta.groupId = actualGroupId;
+        groupIdFixes++;
+      }
+    }
+    if (groupIdFixes > 0) {
+      logger.info('Reconciled stale groupIds in tabMeta', { fixes: groupIdFixes }, cid);
+    }
+  } catch (err) {
+    logger.warn('Failed to reconcile groupIds', { error: err.message }, cid);
+  }
 
   const transitions = evaluateAllTabs(tabMeta, currentActiveTime, settings);
   const transitionCount = Object.keys(transitions).length;
@@ -372,6 +404,7 @@ async function _runEvaluationCycleInner(cid) {
     const showGroupAge = settings.showGroupAge !== undefined
       ? settings.showGroupAge
       : DEFAULT_SHOW_GROUP_AGE;
+    logger.debug('showGroupAge resolved', { showGroupAge, settingsValue: settings.showGroupAge, default: DEFAULT_SHOW_GROUP_AGE });
     if (showGroupAge) {
       await updateGroupTitlesWithAge(wid, tabMeta, windowState, currentActiveTime, settings);
     } else {
@@ -420,10 +453,16 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     tabMeta[tab.id] = entry;
 
     // Context-aware placement for non-command-created tabs (e.g., middle-click, link open)
-    await placeNewTab(tab, tab.windowId, tabMeta, windowState);
-
-    // Persist all meta changes (includes group updates from placeNewTab)
-    await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+    // Guard covers both placement and persist so onUpdated events triggered by
+    // chrome.tabs.group() inside placeNewTab cannot race with our batchWrite.
+    tabPlacementRunning = true;
+    try {
+      await placeNewTab(tab, tab.windowId, tabMeta, windowState);
+      // Persist all meta changes (includes group updates from placeNewTab)
+      await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+    } finally {
+      tabPlacementRunning = false;
+    }
     logger.debug('Tab created', { tabId: tab.id, windowId: tab.windowId }, cid);
   } catch (err) {
     logger.error('onCreated handler failed', { tabId: tab.id, error: err.message }, cid);
@@ -469,7 +508,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   // T041: Handle user manually moving tab to a different group
   // Skip if the evaluation cycle is running — it owns state and will persist it.
-  if (changeInfo.groupId !== undefined && !evaluationCycleRunning) {
+  if (changeInfo.groupId !== undefined && !evaluationCycleRunning && !tabPlacementRunning) {
     try {
       const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
@@ -834,9 +873,19 @@ async function reconcileState(cid) {
     }
 
     const reconciledWindowState = {};
+    // Keep existing window state for windows still open
     for (const [wid, ws] of Object.entries(storedWindowState)) {
       if (chromeWindowIds.has(Number(wid))) {
         reconciledWindowState[wid] = ws;
+      }
+    }
+    // Create default state for windows that have tabs but no stored state
+    for (const wid of chromeWindowIds) {
+      if (!reconciledWindowState[wid] && !reconciledWindowState[String(wid)]) {
+        reconciledWindowState[wid] = {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+        };
       }
     }
 
@@ -849,6 +898,9 @@ async function reconcileState(cid) {
       tabsInChrome: chromeTabs.length,
       tabsReconciled: Object.keys(reconciledMeta).length,
       windowsReconciled: Object.keys(reconciledWindowState).length,
+      chromeWindowCount: chromeWindows.length,
+      chromeWindowTypes: chromeWindows.map((w) => ({ id: w.id, type: w.type })),
+      storedWindowCount: Object.keys(storedWindowState).length,
     }, cid);
   } catch (err) {
     logger.error('State reconciliation failed', { error: err.message, errorCode: ERROR_CODES.ERR_RECOVERY }, cid);

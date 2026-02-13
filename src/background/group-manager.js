@@ -233,7 +233,8 @@ export function computeGroupStatus(groupId, tabMeta) {
 
 export async function updateGroupColor(groupId, status) {
   try {
-    await chrome.tabGroups.update(groupId, { color: status });
+    const result = await chrome.tabGroups.update(groupId, { color: status });
+    logger.debug('Updated group color', { groupId, status, resultColor: result?.color });
   } catch (err) {
     logger.warn('Failed to update group color', {
       groupId,
@@ -288,6 +289,11 @@ export async function sortGroupsIntoZones(windowId, tabMeta, windowState, active
   try {
     // groups come back in current visual order (left → right)
     const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+
+    logger.debug('Raw tabGroups.query result', {
+      windowId,
+      groups: groups.map((g) => ({ id: g.id, title: g.title, color: g.color, collapsed: g.collapsed })),
+    });
 
     // Separate user groups from special groups
     const userGroups = [];
@@ -380,7 +386,7 @@ export async function sortGroupsIntoZones(windowId, tabMeta, windowState, active
     // Update colors for user groups only (never touch special group colors)
     for (const g of ordered) {
       const status = statusMap.get(g.id);
-      if (status && g.color !== status) {
+      if (status) {
         await updateGroupColor(g.id, status);
       }
     }
@@ -522,11 +528,13 @@ export async function updateGroupTitlesWithAge(windowId, tabMeta, windowState, a
 
       if (newTitle !== group.title) {
         try {
-          await chrome.tabGroups.update(group.id, { title: newTitle });
+          const result = await chrome.tabGroups.update(group.id, { title: newTitle });
           updated++;
+          logger.debug('Updated group title with age', { groupId: group.id, newTitle, resultTitle: result?.title });
         } catch (err) {
           logger.warn('Failed to update group title with age', {
             groupId: group.id,
+            newTitle,
             error: err.message,
           });
         }
