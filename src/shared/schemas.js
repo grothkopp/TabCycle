@@ -90,7 +90,7 @@ export function validateTabMeta(obj) {
     if (typeof entry.refreshWallTime !== 'number' || entry.refreshWallTime < 0) {
       errors.push(`${prefix}.refreshWallTime must be a non-negative number`);
     }
-    const validStatuses = [STATUS.GREEN, STATUS.YELLOW, STATUS.RED];
+    const validStatuses = [STATUS.GREEN, STATUS.YELLOW, STATUS.RED, STATUS.GONE];
     if (!validStatuses.includes(entry.status)) {
       errors.push(`${prefix}.status must be one of: ${validStatuses.join(', ')}`);
     }
@@ -131,7 +131,7 @@ export function validateWindowState(obj) {
     if (!state.groupZones || typeof state.groupZones !== 'object') {
       errors.push(`${prefix}.groupZones must be a non-null object`);
     } else {
-      const validZones = [STATUS.GREEN, STATUS.YELLOW, STATUS.RED];
+      const validZones = [STATUS.GREEN, STATUS.YELLOW, STATUS.RED, STATUS.GONE];
       for (const [groupId, zone] of Object.entries(state.groupZones)) {
         if (!validZones.includes(zone)) {
           errors.push(`${prefix}.groupZones[${groupId}] must be one of: ${validZones.join(', ')}`);

@@ -204,8 +204,13 @@ describe('validateTabMeta', () => {
   });
 
   it('should fail for invalid status', () => {
-    const result = validateTabMeta({ 1: { ...validEntry, status: 'gone' } });
+    const result = validateTabMeta({ 1: { ...validEntry, status: 'invalid' } });
     expect(result.valid).toBe(false);
+  });
+
+  it('should pass for gone status', () => {
+    const result = validateTabMeta({ 1: { ...validEntry, status: 'gone' } });
+    expect(result.valid).toBe(true);
   });
 
   it('should fail for negative tabId', () => {
@@ -261,10 +266,20 @@ describe('validateWindowState', () => {
     const result = validateWindowState({
       1: {
         specialGroups: { yellow: null, red: null },
-        groupZones: { 5: 'gone' },
+        groupZones: { 5: 'purple' },
       },
     });
     expect(result.valid).toBe(false);
+  });
+
+  it('should pass for gone zone value', () => {
+    const result = validateWindowState({
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: { 5: 'gone' },
+      },
+    });
+    expect(result.valid).toBe(true);
   });
 
   it('should fail for string specialGroups.yellow', () => {

@@ -16,6 +16,7 @@ globalThis.chrome = {
     update: jest.fn(async (groupId, props) => ({ id: groupId, ...props })),
     query: jest.fn(async () => []),
     move: jest.fn(async () => {}),
+    get: jest.fn(async () => ({})),
   },
   tabs: {
     query: jest.fn(async () => []),
@@ -838,6 +839,99 @@ describe('group-sorting', () => {
       expect(result.tabsMoved).toBe(0);
     });
 
+    it('should close gone ungrouped tab and bookmark it', async () => {
+      const groups = [];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: -1, pinned: false, url: 'https://example.com', title: 'Example' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const mockBookmarkTab = jest.fn().mockResolvedValue(true);
+      const mockBookmarkGroupTabs = jest.fn().mockResolvedValue({ created: 0, skipped: 0, failed: 0 });
+      const mockIsBookmarkableUrl = jest.fn().mockReturnValue(true);
+
+      const goneConfig = {
+        bookmarkEnabled: true,
+        bookmarkFolderId: 'folder-1',
+        bookmarkTab: mockBookmarkTab,
+        bookmarkGroupTabs: mockBookmarkGroupTabs,
+        isBookmarkableUrl: mockIsBookmarkableUrl,
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, goneConfig);
+
+      expect(result.goneTabsClosed).toBe(1);
+      expect(mockBookmarkTab).toHaveBeenCalledTimes(1);
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
+      expect(tabMeta[10]).toBeUndefined();
+    });
+
+    it('should close gone tab in special group and bookmark it', async () => {
+      const groups = [
+        { id: 50, windowId: 1, title: 'Red', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 50, pinned: false, url: 'https://example.com', title: 'Example' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 50, status: 'gone', isSpecialGroup: true, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: 50 }, groupZones: {} },
+      };
+
+      const mockBookmarkTab = jest.fn().mockResolvedValue(true);
+      const mockIsBookmarkableUrl = jest.fn().mockReturnValue(true);
+
+      const goneConfig = {
+        bookmarkEnabled: true,
+        bookmarkFolderId: 'folder-1',
+        bookmarkTab: mockBookmarkTab,
+        bookmarkGroupTabs: jest.fn(),
+        isBookmarkableUrl: mockIsBookmarkableUrl,
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, goneConfig);
+
+      expect(result.goneTabsClosed).toBe(1);
+      expect(mockBookmarkTab).toHaveBeenCalledTimes(1);
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
+    });
+
+    it('should NOT close gone ungrouped tab when goneConfig is not provided', async () => {
+      const groups = [];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: -1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      // No goneConfig passed → gone tabs are skipped
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(result.goneTabsClosed).toBe(0);
+      expect(chrome.tabs.remove).not.toHaveBeenCalled();
+      expect(tabMeta[10]).toBeDefined();
+    });
+
     it('should skip tabs in user groups (they are sorted as groups)', async () => {
       const groups = [
         { id: 5, windowId: 1, title: 'MyGroup', color: 'green' },
@@ -859,6 +953,119 @@ describe('group-sorting', () => {
 
       // Tab should not be individually moved — it's in a user group
       expect(result.tabsMoved).toBe(0);
+    });
+  });
+
+  describe('sortTabsAndGroups – gone zone handling', () => {
+    function makeGoneConfig(overrides = {}) {
+      return {
+        bookmarkEnabled: true,
+        bookmarkFolderId: 'folder-1',
+        bookmarkTab: jest.fn().mockResolvedValue(true),
+        bookmarkGroupTabs: jest.fn().mockResolvedValue({ created: 1, skipped: 0, failed: 0 }),
+        isBookmarkableUrl: jest.fn().mockReturnValue(true),
+        ...overrides,
+      };
+    }
+
+    it('should close a gone user group and bookmark it as a whole', async () => {
+      // Group 5 has two tabs, both gone → group status is gone → close entire group
+      const groups = [
+        { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false, url: 'https://a.com', title: 'A' },
+        { id: 20, windowId: 1, groupId: 5, pinned: false, url: 'https://b.com', title: 'B' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      // Mock chrome.tabGroups.get for bookmarking
+      chrome.tabGroups.get.mockResolvedValue({ id: 5, title: 'OldGroup', color: 'red' });
+      // Mock chrome.tabs.query({ groupId: 5 }) for bookmarking
+      chrome.tabs.query.mockImplementation(async (q) => {
+        if (q.groupId === 5) return tabs;
+        if (q.windowId) return tabs;
+        return [];
+      });
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+
+      expect(result.goneGroupsClosed).toBe(1);
+      expect(gc.bookmarkGroupTabs).toHaveBeenCalledWith('OldGroup', tabs, 'folder-1');
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(20);
+      expect(tabMeta[10]).toBeUndefined();
+      expect(tabMeta[20]).toBeUndefined();
+      expect(windowState[1].groupZones[5]).toBeUndefined();
+    });
+
+    it('should NOT close a group when only some tabs are gone but group is refreshed', async () => {
+      // Tab 10 is gone individually, but tab 20 was refreshed (green).
+      // computeGroupStatus returns 'green' → group is NOT gone.
+      // Tab 10 is in a user group → skipped in phase 2 (ungrouped tab sort).
+      // The group should NOT be closed.
+      const groups = [
+        { id: 5, windowId: 1, title: 'MyGroup', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false },
+        { id: 20, windowId: 1, groupId: 5, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+
+      // Group is NOT gone (freshest tab is green) → no closing
+      expect(result.goneGroupsClosed).toBe(0);
+      expect(result.goneTabsClosed).toBe(0);
+      expect(chrome.tabs.remove).not.toHaveBeenCalled();
+      expect(tabMeta[10]).toBeDefined();
+      expect(tabMeta[20]).toBeDefined();
+      // Group status should be green (freshest tab)
+      expect(windowState[1].groupZones[5]).toBe('green');
+    });
+
+    it('should not bookmark gone tab when bookmarking is disabled', async () => {
+      const groups = [];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: -1, pinned: false, url: 'https://example.com', title: 'Ex' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const gc = makeGoneConfig({ bookmarkEnabled: false });
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+
+      expect(result.goneTabsClosed).toBe(1);
+      expect(gc.bookmarkTab).not.toHaveBeenCalled();
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
     });
   });
 });

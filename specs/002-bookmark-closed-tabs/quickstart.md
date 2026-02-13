@@ -77,6 +77,7 @@ All existing settings remain unchanged:
 - **Green → Yellow threshold**: Default 4 hours
 - **Yellow → Red threshold**: Default 8 hours
 - **Red → Gone threshold**: Default 24 hours
+- **Show group age in title**: Toggle on/off (default: off) — appends age to group names, e.g., "News (23m)"
 
 ## Running Tests
 

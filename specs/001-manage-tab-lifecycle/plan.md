@@ -49,7 +49,7 @@ Build a Google Chrome extension (Manifest V3) named **TabCycle** that tracks tab
   - `tabGroups`: Required to create, update, move, and query tab groups
   - `storage`: Required to persist tab metadata, settings, and active-time state across service worker restarts and browser sessions
   - `alarms`: Required for the 30-second periodic evaluation cycle that survives service worker suspension
-  - `webNavigation`: Required to detect all navigation types including same-URL reloads (which `chrome.tabs.onUpdated` cannot detect)
+  - `webNavigation`: Required to detect all navigation types including same-URL reloads (which `chrome.tabs.onUpdated` cannot detect) and SPA navigations via History API (`onHistoryStateUpdated`)
 - **No host permissions** needed (extension only uses Chrome APIs, no content injection)
 - **No remote code execution** — all logic is bundled
 - **No content scripts** — no page injection needed
@@ -90,11 +90,11 @@ specs/001-manage-tab-lifecycle/
 src/
 ├── manifest.json                # Manifest V3 configuration
 ├── background/
-│   ├── service-worker.js        # Entry point: alarm setup, event listeners, orchestration
+│   ├── service-worker.js        # Entry point: alarm setup, event listeners, orchestration, navigation debounce, guard flags (evaluationCycleRunning, tabPlacementRunning), groupId reconciliation
 │   ├── tab-tracker.js           # Tab refresh-time tracking (creation, navigation, reload detection)
 │   ├── time-accumulator.js      # Global active-time counter (window focus tracking)
 │   ├── status-evaluator.js      # Status calculation: age → Green/Yellow/Red/Gone
-│   ├── group-manager.js         # Group creation, color updates, zone sorting, special group lifecycle
+│   ├── group-manager.js         # Group creation, color updates, zone sorting, special group lifecycle, gone zone handling (bookmark+close via goneConfig callbacks), group age display (formatAge, stripAgeSuffix, computeGroupAge, updateGroupTitlesWithAge, removeAgeSuffixFromAllGroups)
 │   ├── tab-placer.js            # New tab placement logic (context-aware grouping)
 │   └── state-persistence.js     # chrome.storage.local read/write, schema migration, recovery
 ├── options/
@@ -102,7 +102,7 @@ src/
 │   ├── options.js               # Settings page logic (threshold config, mode toggle)
 │   └── options.css              # Settings page styling
 └── shared/
-    ├── constants.js             # Status enums, default thresholds, storage keys, error codes
+    ├── constants.js             # Status enums, default thresholds, storage keys, error codes, DEFAULT_SHOW_GROUP_AGE
     ├── logger.js                # Structured logging utility
     └── schemas.js               # Storage/message schema definitions and validation
 

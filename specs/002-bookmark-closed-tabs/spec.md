@@ -2,7 +2,7 @@
 
 **Feature Branch**: `002-bookmark-closed-tabs`  
 **Created**: 2026-02-13  
-**Status**: Clarified  
+**Status**: Clarified (updated 2026-02-13)  
 **Input**: User description: "I want the option that tabs and tabgroups that are closed by TabCycle because they reach the 'gone' state are saved as bookmarks. This functionality should be able to be turned on and off in the options (default=on). The bookmarks should be stored in a subfolder of All Bookmarks named 'Closed Tabs' (configurable in options). TabGroups should be saved as a subfolder of this folder with the TabGroup Name (or '(unnamed)' if no name was set), individual tabs should just be saved in that folder."
 
 ## Clarifications
@@ -13,6 +13,8 @@
 - Q: If multiple folders under "Other Bookmarks" share the configured name, which one should the extension use? → A: Track the folder by its internal ID after first use; only fall back to name matching if the stored ID is missing or invalid.
 - Q: Should empty/blank tabs (chrome://newtab, about:blank, empty URL) be bookmarked when closed? → A: No. Empty tabs should be closed without creating a bookmark.
 - Q: What should happen when the user manually renames the bookmark folder in Chrome's bookmark manager? → A: The extension should detect the rename via the stored internal folder ID and update the folder name setting in the options to match.
+- Q: Where should bookmark creation happen relative to tab/group closing? → A: Bookmark creation for gone tabs and groups is now performed inside `sortTabsAndGroups` in `group-manager.js`, which receives bookmark functions via a `goneConfig` callback parameter. This centralizes all zone-based logic (including gone handling) in one function. The service worker builds the `goneConfig` with resolved bookmark folder ID and passes it to `sortTabsAndGroups`. This avoids circular dependencies since `bookmark-manager.js` imports from `group-manager.js`.
+- Q: Should the group age suffix (e.g., "(23m)") be included in bookmark folder names? → A: No. When bookmarking a tab group, the age suffix is stripped from the group title before using it as the bookmark subfolder name. The `stripAgeSuffix` utility from `group-manager.js` is used in `bookmark-manager.js` for this purpose (FR-041 in spec 001).
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -44,7 +46,7 @@ As a user, I want tab groups that are closed by TabCycle when they reach the "Go
 
 **Acceptance Scenarios**:
 
-1. **Given** a user-created tab group with a name reaches the "Gone" state, **When** TabCycle closes the group and its tabs, **Then** a subfolder named after the group is created inside "Closed Tabs" and each tab is saved as a bookmark inside that subfolder.
+1. **Given** a user-created tab group whose overall status (determined by `computeGroupStatus` — the freshest tab) reaches the "Gone" state, **When** `sortTabsAndGroups` processes the gone zone, **Then** a subfolder named after the group is created inside "Closed Tabs" and each tab is saved as a bookmark inside that subfolder, and all tabs in the group are closed.
 2. **Given** a user-created tab group with no name (empty name) reaches the "Gone" state, **When** TabCycle closes the group, **Then** a subfolder named "(unnamed)" is created inside "Closed Tabs" containing bookmarks for each tab.
 3. **Given** multiple groups with the same name are closed at different times, **When** each group is closed, **Then** each group creates its own separate subfolder (multiple subfolders with the same name are permitted).
 4. **Given** a tab inside the special "Red" group reaches the "Gone" state and is closed individually (not as part of a group close), **When** TabCycle closes the tab, **Then** the tab is saved as an individual bookmark directly in the "Closed Tabs" folder (not in a subfolder).
@@ -90,6 +92,7 @@ As a user, I want to customize the name of the bookmark folder where closed tabs
 - What happens when the bookmarks permission is not granted or the bookmarks API is unavailable? The extension should log an error and continue closing the tab without creating a bookmark, rather than failing the close operation.
 - What happens when a tab's URL is an empty/blank URL (e.g., `chrome://newtab`, `about:blank`, empty string)? The tab is closed without creating a bookmark — these tabs have no meaningful content to preserve.
 - What happens when a group close includes tabs that have already been individually closed (e.g., race conditions during batch processing)? The extension should create bookmarks only for tabs that still exist at the time of closure.
+- What happens when some tabs in a group are individually "gone" but the group's freshest tab is still green/yellow/red? The group is NOT closed and no tabs are individually closed. Only the group-level status (determined by `computeGroupStatus`) triggers group closure. This prevents premature closing of tabs in recently-refreshed groups.
 - What happens when the bookmark folder is manually deleted by the user between closures? The extension should detect that the folder is missing and recreate it on the next tab close.
 - What happens when the user manually renames the bookmark folder in Chrome's bookmark manager? The extension should detect the rename via the stored folder ID and sync the folder name setting in the options to match the new name.
 - What happens when the user renames the bookmark folder setting while tabs are actively being closed? The extension should use the setting value at the time each tab is closed; in-flight closures use the value read when they started.
@@ -100,8 +103,8 @@ As a user, I want to customize the name of the bookmark folder where closed tabs
 ### Functional Requirements
 
 - **FR-001**: When bookmark saving is enabled and TabCycle closes a tab due to reaching the "Gone" state, the extension MUST create a bookmark with the tab's title and URL.
-- **FR-002**: When bookmark saving is enabled and TabCycle closes a user-created tab group due to reaching the "Gone" state, the extension MUST create a bookmark subfolder named after the group, containing a bookmark for each tab in the group.
-- **FR-003**: When a tab group with no name (empty name) is bookmarked, the extension MUST use "(unnamed)" as the subfolder name.
+- **FR-002**: When bookmark saving is enabled and TabCycle closes a user-created tab group due to reaching the "Gone" state (determined by `computeGroupStatus` — the freshest tab in the group), the extension MUST create a bookmark subfolder named after the group (with any age suffix stripped), containing a bookmark for each tab in the group. This bookmarking is performed inside `sortTabsAndGroups` via the `goneConfig` callback parameter.
+- **FR-003**: When a tab group with no name (empty name) is bookmarked, the extension MUST use "(unnamed)" as the subfolder name. If the group only has an age suffix (e.g., "(23m)") and no base name, stripping the suffix results in an empty name, and "(unnamed)" is used.
 - **FR-004**: Individual tabs closed by TabCycle (including tabs from the special "Red" group) MUST be saved as bookmarks directly in the root bookmark folder (e.g., "Closed Tabs"), not in a subfolder.
 - **FR-005**: The bookmark folder MUST be created as a child of the top-level "Other Bookmarks" node if it does not already exist.
 - **FR-006**: The extension MUST track the bookmark folder by its internal ID after first use. On subsequent operations, the extension MUST look up the folder by stored ID first. If the stored ID is missing or invalid (e.g., folder was deleted), the extension MUST fall back to matching by name under "Other Bookmarks". If neither yields a result, the extension MUST create a new folder.

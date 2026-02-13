@@ -88,12 +88,12 @@ specs/002-bookmark-closed-tabs/
 src/
 ├── manifest.json                # +bookmarks permission
 ├── background/
-│   ├── service-worker.js        # Modified: call bookmark-manager before tab/group close
-│   ├── bookmark-manager.js      # NEW: bookmark creation, folder management, URL filtering
+│   ├── service-worker.js        # Modified: builds goneConfig with bookmark callbacks, passes to sortTabsAndGroups
+│   ├── bookmark-manager.js      # NEW: bookmark creation, folder management, URL filtering, imports stripAgeSuffix from group-manager.js
 │   ├── tab-tracker.js           # Unchanged
 │   ├── time-accumulator.js      # Unchanged
 │   ├── status-evaluator.js      # Unchanged
-│   ├── group-manager.js         # Unchanged
+│   ├── group-manager.js         # Modified: sortTabsAndGroups accepts goneConfig, handles gone zone (bookmark+close)
 │   ├── tab-placer.js            # Unchanged
 │   └── state-persistence.js     # Unchanged (reused for new storage keys)
 ├── options/
@@ -116,7 +116,7 @@ tests/
     └── bookmark-saving.test.js  # NEW: full bookmark saving flow
 ```
 
-**Structure Decision**: Extends the existing single-project Chrome extension layout from feature 001. One new module (`bookmark-manager.js`) encapsulates all bookmark logic. Modifications to existing files are minimal — primarily the service worker (to call bookmark-manager before closing tabs/groups) and the options page (new settings section).
+**Structure Decision**: Extends the existing single-project Chrome extension layout from feature 001. One new module (`bookmark-manager.js`) encapsulates all bookmark logic. `group-manager.js` is modified to accept a `goneConfig` callback parameter in `sortTabsAndGroups`, which handles gone zone bookmarking and closing. The service worker builds `goneConfig` with resolved bookmark folder and callbacks, then passes it to `sortTabsAndGroups`. This avoids circular dependencies (`bookmark-manager.js` imports from `group-manager.js`). The options page adds new settings for bookmark toggle and folder name.
 
 ## Post-Phase 1 Constitution Re-check
 

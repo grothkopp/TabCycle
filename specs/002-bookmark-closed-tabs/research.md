@@ -73,7 +73,18 @@
 - `chrome.bookmarks.onChanged` listener — rejected: fires for all bookmark changes globally; filtering for our specific folder adds complexity with minimal benefit since passive detection on access is fast enough
 - Periodic polling — rejected: unnecessary given the passive detection on each bookmark operation
 
-## 8. Group Bookmark Structure
+## 8. Gone Zone Architecture — Bookmark Integration via Callbacks
+
+**Decision**: Instead of performing bookmark creation in the service worker before calling `closeGoneGroups()`, bookmark functions are passed as callbacks via a `goneConfig` parameter to `sortTabsAndGroups` in `group-manager.js`. The service worker builds the `goneConfig` object with `bookmarkEnabled`, `bookmarkFolderId`, `bookmarkTab`, `bookmarkGroupTabs`, and `isBookmarkableUrl`, then passes it to `sortTabsAndGroups`. Inside `sortTabsAndGroups`, gone ungrouped/special-group tabs are bookmarked and closed individually, and gone user-created groups (where `computeGroupStatus` returns `'gone'`) are bookmarked as a group subfolder and all their tabs are closed.
+
+**Rationale**: The previous architecture had gone handling scattered across the service worker — separate loops for identifying gone tabs, gone groups, bookmarking each, and closing each. This led to a critical bug where individual tabs inside a user-created group were closed when they individually reached gone status, even if the group's freshest tab was recently refreshed. By centralizing gone handling in `sortTabsAndGroups`, the function uses `computeGroupStatus` (which returns the freshest tab's status) to determine group-level gone status, ensuring tabs in groups are never prematurely closed. Bookmark functions are passed as callbacks rather than imported directly to avoid a circular dependency (`bookmark-manager.js` already imports `stripAgeSuffix` from `group-manager.js`).
+
+**Alternatives considered**:
+- Keep bookmark creation in service worker, fix the per-tab bug separately — rejected: still leaves scattered logic across multiple loops; the zone-based architecture in `sortTabsAndGroups` is a natural fit for gone handling
+- Import bookmark functions directly into `group-manager.js` — rejected: creates circular dependency
+- Create a mediator module that orchestrates both — rejected: over-engineering; the callback pattern is simple and sufficient
+
+## 9. Group Bookmark Structure
 
 **Decision**: When a user-created tab group reaches Gone and is closed, create a subfolder inside the bookmark folder named after the group (or "(unnamed)" if the group has no name). Then create a bookmark for each tab in the group inside that subfolder. Tabs individually closed from the special "Red" group are saved directly in the root bookmark folder (not in a subfolder).
 

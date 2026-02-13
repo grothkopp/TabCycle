@@ -68,44 +68,52 @@ Communication between the options page and service worker continues via `chrome.
 ### Tab Close with Bookmark Flow
 
 ```
-chrome.alarms                   Service Worker              chrome.storage / chrome.bookmarks
+chrome.alarms                   Service Worker              group-manager / chrome.bookmarks
      |                               |                           |
      |-- onAlarm "tabcycle-eval" --->|                           |
-     |                               |-- read v1_settings ------>|
+     |                               |-- read v1_settings        |
      |                               |-- check bookmarkEnabled   |
      |                               |                           |
-     |                               |  [if enabled]             |
-     |                               |-- read v1_bookmarkState ->|
-     |                               |-- resolve folder (by ID,  |
-     |                               |   then name, then create) |
+     |                               |  [if enabled & gone tabs] |
+     |                               |-- resolveBookmarkFolder ->|
+     |                               |-- build goneConfig with   |
+     |                               |   bookmark callbacks      |
      |                               |                           |
-     |                               |  [for each gone tab]      |
-     |                               |-- check URL blocklist     |
-     |                               |-- chrome.bookmarks.create |
-     |                               |   (title, url, parentId)  |
+     |                               |-- sortTabsAndGroups() --->|
+     |                               |   (passes goneConfig)     |
      |                               |                           |
-     |                               |-- chrome.tabs.remove ---->|
+     |                               |  [inside sortTabsAndGroups, for each gone ungrouped tab]
+     |                               |   |-- goneConfig.isBookmarkableUrl
+     |                               |   |-- goneConfig.bookmarkTab -> chrome.bookmarks.create
+     |                               |   |-- chrome.tabs.remove
+     |                               |   |-- delete from tabMeta
+     |                               |                           |
      |                               |-- write v1_tabMeta ------>|
      |                               |-- write v1_bookmarkState >|
 ```
 
-### Group Close with Bookmark Flow
+### Group Close with Bookmark Flow (inside sortTabsAndGroups)
 
 ```
-Service Worker                  chrome.bookmarks            chrome.tabs
+sortTabsAndGroups               chrome.bookmarks            chrome.tabs
      |                               |                           |
-     |  [group reached Gone]         |                           |
-     |-- create subfolder ---------->|                           |
-     |   (parentId=folder,           |                           |
-     |    title=groupName)           |                           |
+     |  [computeGroupStatus = gone]  |                           |
+     |  [goneConfig provided]        |                           |
+     |                               |                           |
+     |-- goneConfig.bookmarkGroupTabs                            |
+     |   (groupTitle, tabs, folderId)|                           |
+     |   |-- create subfolder ------>|                           |
+     |   |   (parentId=folder,       |                           |
+     |   |    title=groupName)       |                           |
+     |   |                           |                           |
+     |   |  [for each tab in group]  |                           |
+     |   |-- chrome.bookmarks.create>|                           |
+     |   |   (parentId=subfolder)    |                           |
      |                               |                           |
      |  [for each tab in group]      |                           |
-     |-- check URL blocklist         |                           |
-     |-- chrome.bookmarks.create --->|                           |
-     |   (parentId=subfolder)        |                           |
-     |                               |                           |
      |-- chrome.tabs.remove -------->|                           |
-     |-- chrome.tabGroups.remove? -->|  (auto-removed when empty)|
+     |-- delete from tabMeta         |  (group auto-removed)    |
+     |-- delete from groupZones      |                           |
 ```
 
 ### Settings Save with Folder Rename Flow

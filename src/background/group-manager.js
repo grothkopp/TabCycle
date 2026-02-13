@@ -1,4 +1,4 @@
-import { SPECIAL_GROUP_TYPES, ERROR_CODES } from '../shared/constants.js';
+import { SPECIAL_GROUP_TYPES, ERROR_CODES, STATUS } from '../shared/constants.js';
 import { computeAge } from './status-evaluator.js';
 import { createLogger } from '../shared/logger.js';
 
@@ -216,7 +216,7 @@ export async function moveTabToSpecialGroup(tabId, type, windowId, windowState) 
 
 // ─── Group Status & Sorting (US4) ────────────────────────────────────────────
 
-const STATUS_PRIORITY = { green: 0, yellow: 1, red: 2 };
+const STATUS_PRIORITY = { green: 0, yellow: 1, red: 2, gone: 3 };
 
 export function computeGroupStatus(groupId, tabMeta) {
   let freshest = null;
@@ -288,12 +288,25 @@ const ZONE_RANK = { green: 0, yellow: 1, red: 2 };
  *
  * 1. Ungrouped tabs: if status ≠ zone → move to special group (yellow/red)
  *    or leave to the right of the green zone.  If status = zone → skip.
+ *    Tabs with status 'gone' that are ungrouped or in special groups are
+ *    bookmarked and closed.
  * 2. Groups: compute each group's status, build desired order, compare
- *    to actual order, move only when they differ.
+ *    to actual order, move only when they differ.  Groups whose status
+ *    is 'gone' are bookmarked as a group and closed.
+ *
+ * @param {number} windowId
+ * @param {object} tabMeta
+ * @param {object} windowState
+ * @param {object} [goneConfig] - Optional config for handling gone tabs/groups
+ * @param {boolean} goneConfig.bookmarkEnabled - Whether to bookmark before closing
+ * @param {string|null} goneConfig.bookmarkFolderId - Folder ID for bookmarks
+ * @param {function} goneConfig.bookmarkTab - async (tab, folderId) => boolean
+ * @param {function} goneConfig.bookmarkGroupTabs - async (title, tabs, folderId) => result
+ * @param {function} goneConfig.isBookmarkableUrl - (url) => boolean
  */
-export async function sortTabsAndGroups(windowId, tabMeta, windowState) {
+export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConfig) {
   const ws = ensureWindowState(windowId, windowState);
-  const result = { tabsMoved: 0, groupsMoved: 0 };
+  const result = { tabsMoved: 0, groupsMoved: 0, goneTabsClosed: 0, goneGroupsClosed: 0 };
 
   try {
     // ── 1. Read current browser state ──────────────────────────────────
@@ -341,7 +354,33 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState) {
         else if (sgType === SPECIAL_GROUP_TYPES.RED) currentZone = 'red';
       }
 
-      const desiredZone = meta.status; // green, yellow, or red
+      const desiredZone = meta.status; // green, yellow, red, or gone
+
+      // ── Gone ungrouped/special-group tabs: bookmark + close ──────────
+      if (desiredZone === STATUS.GONE) {
+        if (goneConfig) {
+          if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
+            try {
+              const liveTab = chromeTabMap.get(ct.id);
+              if (liveTab && goneConfig.isBookmarkableUrl(liveTab.url)) {
+                await goneConfig.bookmarkTab(liveTab, goneConfig.bookmarkFolderId);
+                logger.debug('Bookmarked gone ungrouped tab', { tabId: ct.id, url: liveTab.url });
+              }
+            } catch (err) {
+              logger.warn('Failed to bookmark gone tab', { tabId: ct.id, error: err.message });
+            }
+          }
+          try {
+            await chrome.tabs.remove(ct.id);
+            delete tabMeta[ct.id];
+            delete tabMeta[String(ct.id)];
+            result.goneTabsClosed++;
+          } catch (err) {
+            logger.warn('Failed to close gone tab', { tabId: ct.id, error: err.message });
+          }
+        }
+        continue;
+      }
 
       // If status matches zone → don't sort it
       if (currentZone === desiredZone) continue;
@@ -421,6 +460,52 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState) {
       if (!status) continue;
       statusMap.set(group.id, status);
       ws.groupZones[group.id] = status;
+    }
+
+    // ── Handle gone groups: bookmark + close ──────────────────────
+    const goneGroupIds = [];
+    for (const [gid, status] of statusMap) {
+      if (status === STATUS.GONE) goneGroupIds.push(gid);
+    }
+
+    if (goneConfig && goneGroupIds.length > 0) {
+      for (const gid of goneGroupIds) {
+        // Bookmark the group as a whole
+        if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
+          try {
+            const groupInfo = await chrome.tabGroups.get(gid);
+            const groupTabs = await chrome.tabs.query({ groupId: gid });
+            await goneConfig.bookmarkGroupTabs(
+              groupInfo.title || '', groupTabs, goneConfig.bookmarkFolderId
+            );
+            logger.info('Bookmarked gone group', {
+              groupId: gid, title: groupInfo.title || '(unnamed)', tabCount: groupTabs.length,
+            });
+          } catch (err) {
+            logger.warn('Failed to bookmark gone group', { groupId: gid, error: err.message });
+          }
+        }
+
+        // Close all tabs in the group
+        const tabsInGroup = Object.values(tabMeta).filter(
+          (m) => m.groupId === gid && m.windowId === Number(windowId) && !m.pinned
+        );
+        for (const m of tabsInGroup) {
+          try {
+            await chrome.tabs.remove(m.tabId);
+          } catch (err) {
+            logger.warn('Failed to remove tab from gone group', { tabId: m.tabId, groupId: gid, error: err.message });
+          }
+          delete tabMeta[m.tabId];
+          delete tabMeta[String(m.tabId)];
+        }
+
+        // Clean up groupZones
+        delete ws.groupZones[gid];
+        delete ws.groupZones[String(gid)];
+        result.goneGroupsClosed++;
+        statusMap.delete(gid);
+      }
     }
 
     const ordered = userGroups.filter((g) => statusMap.has(g.id));
@@ -530,6 +615,8 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState) {
       windowId,
       tabsMoved: result.tabsMoved,
       groupsMoved: result.groupsMoved,
+      goneTabsClosed: result.goneTabsClosed,
+      goneGroupsClosed: result.goneGroupsClosed,
       desiredGroupOrder: desiredIds,
     });
   } catch (err) {

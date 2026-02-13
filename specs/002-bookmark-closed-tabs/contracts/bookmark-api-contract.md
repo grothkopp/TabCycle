@@ -52,7 +52,7 @@ const otherBookmarks = tree[0].children.find(node => node.title === "Other Bookm
 
 ## API: `chrome.bookmarks.create(createDetails)`
 
-**Used by**: bookmark-manager.js (service worker)
+**Used by**: bookmark-manager.js (called from group-manager.js `sortTabsAndGroups` via `goneConfig` callbacks, and from service worker for folder resolution)
 **Purpose**: Create bookmark folders, group subfolders, and individual bookmarks.
 
 ### Creating the root bookmark folder

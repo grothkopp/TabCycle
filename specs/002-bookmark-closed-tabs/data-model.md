@@ -45,6 +45,7 @@ v1_settings: {
     yellowToRed: number,
     redToGone: number
   },
+  showGroupAge: boolean,              // NEW (from feature 001 Phase 11): Show group age in title (default: false)
   bookmarkEnabled: boolean,          // NEW: Enable/disable bookmark saving (default: true)
   bookmarkFolderName: string         // NEW: Name of the bookmark folder (default: "Closed Tabs")
 }
@@ -54,6 +55,7 @@ v1_settings: {
 
 | Field | Type | Default | Constraints |
 |-------|------|---------|-------------|
+| `showGroupAge` | `boolean` | `false` | Must be boolean (from feature 001 Phase 11) |
 | `bookmarkEnabled` | `boolean` | `true` | Must be boolean |
 | `bookmarkFolderName` | `string` | `"Closed Tabs"` | Must be non-empty string |
 
@@ -92,8 +94,8 @@ Other Bookmarks/                          # Chrome's built-in "Other Bookmarks" 
 
 **Rules**:
 - Individual tabs (including those from the special "Red" group) → bookmarks directly in "Closed Tabs" folder
-- User-created tab groups → subfolder named after the group, containing bookmarks for each tab
-- Unnamed groups → subfolder named "(unnamed)"
+- User-created tab groups → subfolder named after the group (age suffix stripped, e.g., "News" not "News (23m)"), containing bookmarks for each tab
+- Unnamed groups → subfolder named "(unnamed)" (also used when a group's only "name" was an age suffix)
 - Multiple subfolders with the same name are permitted (separate group closures)
 - Tabs with empty URL, `chrome://newtab`, or `about:blank` → skipped (FR-017)
 - Tabs with no title → bookmark title falls back to the tab's URL
@@ -121,5 +123,5 @@ Other Bookmarks/                          # Chrome's built-in "Other Bookmarks" 
 
 - **Bookmark state writes**: On folder creation, rediscovery, or ID change only (infrequent)
 - **Settings writes**: On user save in options page (includes bookmark fields)
-- **Bookmark creation**: Synchronous before tab removal (await `chrome.bookmarks.create()` then `chrome.tabs.remove()`)
+- **Bookmark creation**: Performed inside `sortTabsAndGroups` via `goneConfig` callbacks. The service worker resolves the bookmark folder once per evaluation cycle and passes it via `goneConfig`. For ungrouped/special-group gone tabs, `goneConfig.bookmarkTab` is called before `chrome.tabs.remove()`. For gone groups, `goneConfig.bookmarkGroupTabs` is called before closing all tabs in the group. All operations are awaited sequentially.
 - **Error isolation**: Each bookmark creation is independently try/caught; one failure does not block others or tab closure

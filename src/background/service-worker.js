@@ -11,7 +11,6 @@ import {
   computeGroupStatus,
   updateGroupColor,
   sortTabsAndGroups,
-  closeGoneGroups,
   dissolveUnnamedSingleTabGroups,
   updateGroupTitlesWithAge,
   removeAgeSuffixFromAllGroups,
@@ -36,6 +35,76 @@ const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
 // Guard: suppress onUpdated groupId handler while placeNewTab is running
 let tabPlacementRunning = false;
+
+// ─── Debounced Sort & Title Update ───────────────────────────────────────────
+// Called from reactive event handlers (tab move, group change, etc.) to keep
+// the tab bar sorted and group titles/colors up to date without waiting for
+// the next 30-second evaluation cycle.
+const SORT_DEBOUNCE_MS = 300;
+const _sortTimers = new Map(); // windowId → timeoutId
+let sortUpdateRunning = false; // suppress reactive handlers during sort
+
+function _scheduleSortAndUpdate(windowId) {
+  if (evaluationCycleRunning || sortUpdateRunning) return;
+  const existing = _sortTimers.get(windowId);
+  if (existing) clearTimeout(existing);
+  _sortTimers.set(windowId, setTimeout(() => {
+    _sortTimers.delete(windowId);
+    _runSortAndUpdate(windowId);
+  }, SORT_DEBOUNCE_MS));
+}
+
+async function _runSortAndUpdate(windowId) {
+  if (evaluationCycleRunning || sortUpdateRunning) return;
+  sortUpdateRunning = true;
+  const cid = logger.correlationId();
+  try {
+    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
+    const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
+    const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+    const settings = state[STORAGE_KEYS.SETTINGS] || {};
+
+    // Reconcile groupIds for this window before sorting
+    try {
+      const chromeTabs = await chrome.tabs.query({ windowId: Number(windowId) });
+      for (const ct of chromeTabs) {
+        const meta = tabMeta[ct.id] || tabMeta[String(ct.id)];
+        if (!meta) continue;
+        const actualGroupId = ct.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? ct.groupId : null;
+        if (meta.groupId !== actualGroupId) {
+          meta.groupId = actualGroupId;
+          meta.isSpecialGroup = actualGroupId !== null && isSpecialGroup(actualGroupId, Number(windowId), windowState);
+        }
+      }
+    } catch (err) {
+      logger.warn('Sort-update: failed to reconcile groupIds', { windowId, error: err.message }, cid);
+    }
+
+    await dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowState);
+    await sortTabsAndGroups(windowId, tabMeta, windowState);
+
+    // Update group titles with age if enabled
+    const showGroupAge = settings.showGroupAge !== undefined
+      ? settings.showGroupAge
+      : DEFAULT_SHOW_GROUP_AGE;
+    if (showGroupAge) {
+      const currentActiveTime = await getCurrentActiveTime();
+      await updateGroupTitlesWithAge(windowId, tabMeta, windowState, currentActiveTime, settings);
+    } else {
+      await removeAgeSuffixFromAllGroups(windowId, windowState);
+    }
+
+    await batchWrite({
+      [STORAGE_KEYS.TAB_META]: tabMeta,
+      [STORAGE_KEYS.WINDOW_STATE]: windowState,
+    });
+    logger.debug('Debounced sort+update complete', { windowId }, cid);
+  } catch (err) {
+    logger.warn('Debounced sort+update failed', { windowId, error: err.message }, cid);
+  } finally {
+    sortUpdateRunning = false;
+  }
+}
 
 // ─── Installation ────────────────────────────────────────────────────────────
 
@@ -190,184 +259,43 @@ async function _runEvaluationCycleInner(cid) {
   const transitions = evaluateAllTabs(tabMeta, currentActiveTime, settings);
   const transitionCount = Object.keys(transitions).length;
 
-  // Separate gone tabs from other transitions
-  const goneTabIds = [];
+  // Apply ALL transitions to tabMeta (including gone — sortTabsAndGroups handles closing)
   for (const [tabId, t] of Object.entries(transitions)) {
-    if (t.newStatus === STATUS.GONE) {
-      goneTabIds.push(Number(tabId));
-    } else {
-      tabMeta[tabId].status = t.newStatus;
-    }
+    tabMeta[tabId].status = t.newStatus;
   }
 
-  // Resolve bookmark folder once if bookmarking is enabled and there are gone tabs
+  // ── Build goneConfig for sortTabsAndGroups ─────────────────────────
   const bookmarkEnabled = settings.bookmarkEnabled !== undefined
     ? settings.bookmarkEnabled
     : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
   let bookmarkFolderId = null;
 
-  if (bookmarkEnabled && goneTabIds.length > 0) {
+  // Check if any tab has gone status — resolve bookmark folder once
+  const hasGoneTabs = Object.values(tabMeta).some((m) => m.status === STATUS.GONE);
+  if (bookmarkEnabled && hasGoneTabs) {
     bookmarkFolderId = await resolveBookmarkFolder(settings);
-    logger.debug('Bookmark folder resolved', { bookmarkFolderId, bookmarkEnabled }, cid);
+    logger.debug('Bookmark folder resolved for gone handling', { bookmarkFolderId, bookmarkEnabled }, cid);
   }
 
-  // ── Identify gone groups BEFORE removing any tabs ──────────────────
-  // We must do this now while the tabs and groups still exist in Chrome,
-  // so that chrome.tabGroups.get() and chrome.tabs.query() can retrieve
-  // group info and tab URLs for bookmarking.
-  const goneGroupIds = [];          // group IDs whose every tab is gone
-  const goneGroupTabIds = new Set(); // tab IDs that belong to a gone group
+  const goneConfig = {
+    bookmarkEnabled,
+    bookmarkFolderId,
+    bookmarkTab,
+    bookmarkGroupTabs,
+    isBookmarkableUrl,
+  };
 
-  // Collect all user-group IDs that have at least one gone tab
-  const candidateGroupIds = new Set();
-  for (const tabId of goneTabIds) {
-    const meta = tabMeta[tabId] || tabMeta[String(tabId)];
-    if (meta && meta.groupId !== null && !meta.isSpecialGroup) {
-      candidateGroupIds.add(meta.groupId);
-    }
-  }
-
-  // A group is "gone" when ALL its non-pinned tabs are gone
-  for (const gid of candidateGroupIds) {
-    const allTabsInGroup = Object.values(tabMeta).filter(
-      (m) => m.groupId === gid && !m.pinned && !m.isSpecialGroup
-    );
-    const allGone = allTabsInGroup.length > 0 && allTabsInGroup.every(
-      (m) => goneTabIds.includes(m.tabId)
-    );
-    if (allGone) {
-      goneGroupIds.push(gid);
-      for (const m of allTabsInGroup) goneGroupTabIds.add(m.tabId);
-    }
-  }
-
-  // Capture window ID for each gone group while tabMeta still has the tabs
-  const goneGroupWindowMap = new Map(); // groupId → windowId
-  for (const gid of goneGroupIds) {
-    const sample = Object.values(tabMeta).find(
-      (m) => m.groupId === gid && !m.pinned && !m.isSpecialGroup
-    );
-    if (sample) goneGroupWindowMap.set(gid, sample.windowId);
-  }
-
-  logger.debug('Gone analysis', {
-    goneTabCount: goneTabIds.length,
-    goneGroupCount: goneGroupIds.length,
-    goneGroupTabCount: goneGroupTabIds.size,
-    goneGroupIds,
-  }, cid);
-
-  // ── Bookmark gone GROUPS first (tabs still exist in Chrome) ────────
-  const bookmarkedGroupIds = new Set(); // dedup guard
-  if (bookmarkEnabled && bookmarkFolderId && goneGroupIds.length > 0) {
-    for (const gid of goneGroupIds) {
-      if (bookmarkedGroupIds.has(gid)) {
-        logger.warn('Skipping duplicate group bookmark', { groupId: gid }, cid);
-        continue;
-      }
-      try {
-        const groupInfo = await chrome.tabGroups.get(gid);
-        const groupTabs = await chrome.tabs.query({ groupId: gid });
-        logger.debug('Bookmarking gone group', {
-          groupId: gid,
-          groupTitle: groupInfo.title || '(unnamed)',
-          tabCount: groupTabs.length,
-          tabUrls: groupTabs.map((t) => t.url),
-        }, cid);
-        const result = await bookmarkGroupTabs(groupInfo.title, groupTabs, bookmarkFolderId);
-        bookmarkedGroupIds.add(gid);
-        logger.info('Bookmarked gone group', {
-          groupId: gid,
-          groupTitle: groupInfo.title || '(unnamed)',
-          tabsCreated: result.created,
-          tabsSkipped: result.skipped,
-          tabsFailed: result.failed,
-        }, cid);
-      } catch (err) {
-        logger.warn('Failed to bookmark gone group', {
-          groupId: gid,
-          error: err.message,
-          errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
-        }, cid);
-      }
-    }
-  }
-
-  // ── Bookmark individual gone tabs (not part of a gone group) ───────
-  let bookmarksCreated = 0;
-  let bookmarksSkipped = 0;
-
-  for (const tabId of goneTabIds) {
-    // Skip tabs already bookmarked as part of a gone group
-    if (goneGroupTabIds.has(tabId)) continue;
-
-    if (bookmarkEnabled && bookmarkFolderId) {
-      try {
-        const tab = await chrome.tabs.get(tabId);
-        if (isBookmarkableUrl(tab.url)) {
-          await bookmarkTab(tab, bookmarkFolderId);
-          bookmarksCreated++;
-          logger.debug('Bookmarked individual gone tab', { tabId, url: tab.url }, cid);
-        } else {
-          bookmarksSkipped++;
-          logger.debug('Skipped bookmarking tab with blocklisted URL', { tabId, url: tab.url }, cid);
-        }
-      } catch (err) {
-        logger.warn('Failed to bookmark gone tab', { tabId, error: err.message, errorCode: ERROR_CODES.ERR_BOOKMARK_CREATE }, cid);
-      }
-    }
-  }
-
-  // ── Remove all gone tabs and close gone groups ─────────────────────
-  for (const tabId of goneTabIds) {
-    try {
-      await chrome.tabs.remove(tabId);
-    } catch (err) {
-      logger.warn('Failed to remove gone tab', { tabId, error: err.message, errorCode: ERROR_CODES.ERR_TAB_REMOVE }, cid);
-    }
-    delete tabMeta[tabId];
-  }
-
-  // Close gone groups and clean up groupZones
+  // ── Per-window: dissolve, sort (incl. gone handling), update titles ─
   const allWindows = new Set(Object.values(tabMeta).map((m) => m.windowId));
-  // Ensure windows with gone groups are included (their tabs are already deleted from tabMeta)
-  for (const wid of goneGroupWindowMap.values()) allWindows.add(wid);
 
   for (const wid of allWindows) {
-    // Gone groups for this window (identified before tab removal)
-    const windowGoneGroupIds = goneGroupIds.filter(
-      (gid) => goneGroupWindowMap.get(gid) === Number(wid)
-    );
-
-    // Also find groups that lost all tabs for other reasons (e.g. manual removal)
-    const remainingGroupIds = new Set();
-    for (const m of Object.values(tabMeta)) {
-      if (m.windowId === Number(wid) && m.groupId !== null && !m.isSpecialGroup) {
-        remainingGroupIds.add(m.groupId);
-      }
-    }
-    const emptyGroupIds = [];
-    for (const gid of remainingGroupIds) {
-      const status = computeGroupStatus(gid, tabMeta);
-      if (status === null) emptyGroupIds.push(gid);
-    }
-
-    const allGoneGroupIds = [...new Set([...windowGoneGroupIds, ...emptyGroupIds])];
-
-    if (allGoneGroupIds.length > 0) {
-      const closedIds = await closeGoneGroups(wid, allGoneGroupIds, tabMeta, windowState);
-      for (const id of closedIds) {
-        delete tabMeta[id];
-        delete tabMeta[String(id)];
-      }
-    }
-
     // Dissolve unnamed single-tab groups
     await dissolveUnnamedSingleTabGroups(wid, tabMeta, windowState);
 
     // Unified sort: reads browser state, moves ungrouped tabs to special
-    // groups as needed, then sorts all groups into zone order
-    await sortTabsAndGroups(wid, tabMeta, windowState);
+    // groups as needed, closes gone tabs/groups, then sorts remaining
+    // groups into zone order
+    await sortTabsAndGroups(wid, tabMeta, windowState, goneConfig);
 
     // Update group titles with age if enabled
     const showGroupAge = settings.showGroupAge !== undefined
@@ -390,9 +318,6 @@ async function _runEvaluationCycleInner(cid) {
     logger.info('Evaluation cycle complete with transitions', {
       tabCount: Object.keys(tabMeta).length,
       transitions: transitionCount,
-      goneClosed: goneTabIds.length,
-      bookmarksCreated,
-      bookmarksSkipped,
       currentActiveTimeMs: currentActiveTime,
     }, cid);
   } else {
@@ -433,13 +358,14 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       tabPlacementRunning = false;
     }
     logger.debug('Tab created', { tabId: tab.id, windowId: tab.windowId }, cid);
+    _scheduleSortAndUpdate(tab.windowId);
   } catch (err) {
     logger.error('onCreated handler failed', { tabId: tab.id, error: err.message }, cid);
   }
 });
 
 chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
-  if (evaluationCycleRunning) return;
+  if (evaluationCycleRunning || sortUpdateRunning) return;
   const cid = logger.correlationId();
   try {
     if (removeInfo.isWindowClosing) {
@@ -467,6 +393,7 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
     await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
 
     logger.debug('Tab removed', { tabId, windowId: removeInfo.windowId }, cid);
+    _scheduleSortAndUpdate(removeInfo.windowId);
   } catch (err) {
     logger.error('onRemoved handler failed', { tabId, error: err.message }, cid);
   }
@@ -477,7 +404,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   // T041: Handle user manually moving tab to a different group
   // Skip if the evaluation cycle is running — it owns state and will persist it.
-  if (changeInfo.groupId !== undefined && !evaluationCycleRunning && !tabPlacementRunning) {
+  if (changeInfo.groupId !== undefined && !evaluationCycleRunning && !tabPlacementRunning && !sortUpdateRunning) {
     try {
       const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
@@ -493,6 +420,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
       // Dissolve any extension-created unnamed groups now left with a single tab
       await dissolveUnnamedSingleTabGroups(tab.windowId, tabMeta, windowState);
       await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      _scheduleSortAndUpdate(tab.windowId);
     } catch (err) {
       logger.error('onUpdated groupId handler failed', { tabId, error: err.message }, cid);
     }
@@ -520,7 +448,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 // ─── Tab Moved (backup dissolution trigger) ─────────────────────────────────
 
 chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
-  if (evaluationCycleRunning) return;
+  if (evaluationCycleRunning || sortUpdateRunning) return;
   const cid = logger.correlationId();
   try {
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
@@ -531,6 +459,7 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
       await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
       logger.debug('Dissolved groups after tab move', { tabId, windowId: moveInfo.windowId, dissolved }, cid);
     }
+    _scheduleSortAndUpdate(moveInfo.windowId);
   } catch (err) {
     logger.warn('onMoved dissolution check failed', { tabId, error: err.message }, cid);
   }
@@ -724,6 +653,7 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
         tabId,
         newWindowId: attachInfo.newWindowId,
       }, cid);
+      _scheduleSortAndUpdate(attachInfo.newWindowId);
     }
   } catch (err) {
     logger.error('onAttached handler failed', { tabId, error: err.message }, cid);
@@ -754,6 +684,7 @@ chrome.tabGroups.onRemoved.addListener(async (group) => {
       }
     }
     logger.debug('Tab group removed', { groupId: group.id, windowId: group.windowId }, cid);
+    _scheduleSortAndUpdate(group.windowId);
   } catch (err) {
     logger.error('onGroupRemoved handler failed', { groupId: group.id, error: err.message }, cid);
   }
@@ -773,6 +704,7 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
     // For user groups: we never overwrite the user's title (FR-023)
     // Color will be re-applied to match status on next evaluation cycle
     logger.debug('Tab group updated by user', { groupId: group.id, title: group.title, color: group.color }, cid);
+    _scheduleSortAndUpdate(group.windowId);
   } catch (err) {
     logger.error('onGroupUpdated handler failed', { groupId: group.id, error: err.message }, cid);
   }
