@@ -525,6 +525,64 @@ describe('group-sorting', () => {
       expect(moveCalls[2]).toEqual([2, { index: -1 }]);   // staying green
     });
 
+    it('should place a brand-new green group at leftmost position (no prior groupZones entry)', async () => {
+      // Visual: [green:1] [green:2] [green:3(new)]
+      // Group 3 is brand new (no groupZones entry) → desired: [green:3(new)] [green:1] [green:2]
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+        { id: 2, windowId: 1, title: 'B', color: 'green' },
+        { id: 3, windowId: 1, title: 'C', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+        { id: 20, windowId: 1, groupId: 2, pinned: false },
+        { id: 30, windowId: 1, groupId: 3, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 3, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      // Group 3 has NO prior groupZones entry — it's brand new
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'green' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Desired: [green:3(new, leftmost)] [green:1] [green:2]
+      expect(result.groupsMoved).toBe(3);
+      const moveCalls = chrome.tabGroups.move.mock.calls;
+      expect(moveCalls[0]).toEqual([3, { index: -1 }]);   // brand-new green (leftmost)
+      expect(moveCalls[1]).toEqual([1, { index: -1 }]);   // staying green
+      expect(moveCalls[2]).toEqual([2, { index: -1 }]);   // staying green
+    });
+
+    it('should NOT move a brand-new green group when it is the only group', async () => {
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      expect(result.groupsMoved).toBe(0);
+      expect(chrome.tabGroups.move).not.toHaveBeenCalled();
+    });
+
     // ── Special group handling ────────────────────────────────────────
 
     it('should move Yellow special to the right of green groups when no yellow user groups exist', async () => {

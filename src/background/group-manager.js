@@ -510,12 +510,19 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
 
     const ordered = userGroups.filter((g) => statusMap.has(g.id));
 
-    // Detect which groups just transitioned into a new zone
+    // Detect which groups just transitioned into a new zone.
+    // Brand-new groups (no previous zone entry) that are green are also
+    // treated as "just arrived" so they sort to the LEFT of the green
+    // zone instead of being appended to the right.
     const justArrived = new Set();
     for (const g of ordered) {
       const cur = statusMap.get(g.id);
       const prev = prevZones[g.id] || prevZones[String(g.id)];
-      if (prev !== undefined && prev !== cur) {
+      if (prev === undefined) {
+        // New group with no prior zone — treat green as "just arrived"
+        // so it lands at the leftmost position in the green zone.
+        if (cur === 'green') justArrived.add(g.id);
+      } else if (prev !== cur) {
         justArrived.add(g.id);
       }
     }
