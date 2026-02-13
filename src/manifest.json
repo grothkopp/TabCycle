@@ -8,7 +8,8 @@
     "tabGroups",
     "storage",
     "alarms",
-    "webNavigation"
+    "webNavigation",
+    "bookmarks"
   ],
   "background": {
     "service_worker": "background/service-worker.js",

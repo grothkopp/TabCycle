@@ -1,7 +1,11 @@
-import { STORAGE_KEYS, DEFAULT_THRESHOLDS, TIME_MODE } from '../shared/constants.js';
+import { STORAGE_KEYS, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, TIME_MODE, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('options');
+
+// Stored bookmark folder ID — loaded on page init, used during save for rename
+let storedBookmarkFolderId = null;
+let loadedBookmarkFolderName = null;
 
 const UNIT_TO_MS = {
   minutes: 60 * 1000,
@@ -70,6 +74,20 @@ async function loadSettings() {
     document.getElementById('redToGone').value = r2g.value;
     document.getElementById('redToGoneUnit').value = r2g.unit;
 
+    const bookmarkEnabled = settings.bookmarkEnabled !== undefined
+      ? settings.bookmarkEnabled
+      : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
+    document.getElementById('bookmarkEnabled').checked = bookmarkEnabled;
+
+    const bookmarkFolderName = settings.bookmarkFolderName || DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME;
+    document.getElementById('bookmarkFolderName').value = bookmarkFolderName;
+    loadedBookmarkFolderName = bookmarkFolderName;
+
+    // Load stored bookmark folder ID for rename operations
+    const bmState = await chrome.storage.local.get(STORAGE_KEYS.BOOKMARK_STATE);
+    const bookmarkState = bmState[STORAGE_KEYS.BOOKMARK_STATE];
+    storedBookmarkFolderId = bookmarkState ? bookmarkState.folderId : null;
+
     logger.info('Settings loaded');
   } catch (err) {
     logger.error('Failed to load settings', { error: err.message });
@@ -122,15 +140,36 @@ async function saveSettings(event) {
     return;
   }
 
+  const bookmarkEnabled = document.getElementById('bookmarkEnabled').checked;
+  const bookmarkFolderName = document.getElementById('bookmarkFolderName').value.trim();
+
+  if (!bookmarkFolderName) {
+    showError('bookmarkFolderName', 'Folder name cannot be empty');
+    return;
+  }
+
+  // Rename existing folder if name changed and folder ID is known (FR-010)
+  if (bookmarkFolderName !== loadedBookmarkFolderName && storedBookmarkFolderId) {
+    try {
+      await chrome.bookmarks.update(storedBookmarkFolderId, { title: bookmarkFolderName });
+      logger.info('Bookmark folder renamed', { oldName: loadedBookmarkFolderName, newName: bookmarkFolderName, folderId: storedBookmarkFolderId });
+    } catch (err) {
+      logger.warn('Failed to rename bookmark folder', { error: err.message, errorCode: ERROR_CODES.ERR_BOOKMARK_RENAME, folderId: storedBookmarkFolderId });
+    }
+  }
+
   const settings = {
     timeMode,
     thresholds: { greenToYellow, yellowToRed, redToGone },
+    bookmarkEnabled,
+    bookmarkFolderName,
   };
 
   try {
     await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: settings });
+    loadedBookmarkFolderName = bookmarkFolderName;
     showSaveStatus('Settings saved', false);
-    logger.info('Settings saved', { timeMode, greenToYellow, yellowToRed, redToGone });
+    logger.info('Settings saved', { timeMode, greenToYellow, yellowToRed, redToGone, bookmarkEnabled, bookmarkFolderName });
   } catch (err) {
     logger.error('Failed to save settings', { error: err.message });
     showSaveStatus('Failed to save settings', true);

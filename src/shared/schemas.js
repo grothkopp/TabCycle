@@ -28,6 +28,25 @@ export function validateSettings(obj) {
       errors.push('thresholds.yellowToRed must be less than thresholds.redToGone');
     }
   }
+  if (obj.bookmarkEnabled !== undefined && typeof obj.bookmarkEnabled !== 'boolean') {
+    errors.push('bookmarkEnabled must be a boolean');
+  }
+  if (obj.bookmarkFolderName !== undefined) {
+    if (typeof obj.bookmarkFolderName !== 'string' || obj.bookmarkFolderName.length === 0) {
+      errors.push('bookmarkFolderName must be a non-empty string');
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+export function validateBookmarkState(obj) {
+  const errors = [];
+  if (!obj || typeof obj !== 'object') {
+    return { valid: false, errors: ['BookmarkState must be a non-null object'] };
+  }
+  if (obj.folderId !== null && (typeof obj.folderId !== 'string' || obj.folderId.length === 0)) {
+    errors.push('folderId must be null or a non-empty string');
+  }
   return { valid: errors.length === 0, errors };
 }
 

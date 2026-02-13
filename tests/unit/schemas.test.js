@@ -1,5 +1,6 @@
 import {
   validateSettings,
+  validateBookmarkState,
   validateActiveTime,
   validateTabMeta,
   validateWindowState,
@@ -67,6 +68,73 @@ describe('validateSettings', () => {
     const result = validateSettings({ timeMode: 'active' });
     expect(result.valid).toBe(false);
     expect(result.errors.some((e) => e.includes('thresholds'))).toBe(true);
+  });
+
+  it('should pass with bookmarkEnabled true', () => {
+    const result = validateSettings({ ...validSettings, bookmarkEnabled: true });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should pass with bookmarkEnabled false', () => {
+    const result = validateSettings({ ...validSettings, bookmarkEnabled: false });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail for non-boolean bookmarkEnabled', () => {
+    const result = validateSettings({ ...validSettings, bookmarkEnabled: 'yes' });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('bookmarkEnabled'))).toBe(true);
+  });
+
+  it('should pass with valid bookmarkFolderName', () => {
+    const result = validateSettings({ ...validSettings, bookmarkFolderName: 'My Tabs' });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail for empty bookmarkFolderName', () => {
+    const result = validateSettings({ ...validSettings, bookmarkFolderName: '' });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('bookmarkFolderName'))).toBe(true);
+  });
+
+  it('should fail for non-string bookmarkFolderName', () => {
+    const result = validateSettings({ ...validSettings, bookmarkFolderName: 123 });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('bookmarkFolderName'))).toBe(true);
+  });
+
+  it('should pass without bookmark fields (backward compatibility)', () => {
+    const result = validateSettings(validSettings);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe('validateBookmarkState', () => {
+  it('should pass for valid bookmark state with folderId', () => {
+    const result = validateBookmarkState({ folderId: '42' });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should pass for bookmark state with null folderId', () => {
+    const result = validateBookmarkState({ folderId: null });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail for null input', () => {
+    const result = validateBookmarkState(null);
+    expect(result.valid).toBe(false);
+  });
+
+  it('should fail for empty string folderId', () => {
+    const result = validateBookmarkState({ folderId: '' });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('folderId'))).toBe(true);
+  });
+
+  it('should fail for numeric folderId', () => {
+    const result = validateBookmarkState({ folderId: 42 });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('folderId'))).toBe(true);
   });
 });
 

@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
 import { createTabEntry, handleNavigation, reconcileTabs } from './tab-tracker.js';
@@ -16,6 +16,7 @@ import {
   dissolveUnnamedSingleTabGroups,
 } from './group-manager.js';
 import { placeNewTab } from './tab-placer.js';
+import { resolveBookmarkFolder, isBookmarkableUrl, bookmarkTab, bookmarkGroupTabs } from './bookmark-manager.js';
 import {
   initActiveTime,
   recoverActiveTime,
@@ -42,6 +43,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
           redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
         },
+        bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
+        bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
       };
 
       await batchWrite({
@@ -49,6 +52,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         [STORAGE_KEYS.SETTINGS]: defaultSettings,
         [STORAGE_KEYS.TAB_META]: {},
         [STORAGE_KEYS.WINDOW_STATE]: {},
+        [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: null },
       });
 
       await initActiveTime();
@@ -125,7 +129,36 @@ async function runEvaluationCycle(cid) {
     }
   }
 
+  // Bookmark individual gone tabs before removal (FR-001, FR-004, FR-012, FR-017)
+  const bookmarkEnabled = settings.bookmarkEnabled !== undefined
+    ? settings.bookmarkEnabled
+    : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
+  let bookmarkFolderId = null;
+
+  if (bookmarkEnabled && goneTabIds.length > 0) {
+    bookmarkFolderId = await resolveBookmarkFolder(settings);
+  }
+
+  let bookmarksCreated = 0;
+  let bookmarksSkipped = 0;
+
   for (const tabId of goneTabIds) {
+    // Bookmark before removal — tab info must be captured first
+    if (bookmarkEnabled && bookmarkFolderId) {
+      try {
+        const tab = await chrome.tabs.get(tabId);
+        if (isBookmarkableUrl(tab.url)) {
+          await bookmarkTab(tab, bookmarkFolderId);
+          bookmarksCreated++;
+        } else {
+          bookmarksSkipped++;
+          logger.debug('Skipped bookmarking tab with blocklisted URL', { tabId, url: tab.url }, cid);
+        }
+      } catch (err) {
+        logger.warn('Failed to bookmark gone tab', { tabId, error: err.message, errorCode: ERROR_CODES.ERR_BOOKMARK_CREATE }, cid);
+      }
+    }
+
     try {
       await chrome.tabs.remove(tabId);
     } catch (err) {
@@ -182,6 +215,30 @@ async function runEvaluationCycle(cid) {
       if (status === null) goneGroupIds.push(gid); // no non-pinned tabs left
     }
     if (goneGroupIds.length > 0) {
+      // Bookmark gone groups before closing them (FR-002, FR-003, FR-012)
+      if (bookmarkEnabled && bookmarkFolderId) {
+        for (const gid of goneGroupIds) {
+          try {
+            const groupInfo = await chrome.tabGroups.get(gid);
+            const groupTabs = await chrome.tabs.query({ groupId: gid });
+            const result = await bookmarkGroupTabs(groupInfo.title, groupTabs, bookmarkFolderId);
+            logger.info('Bookmarked gone group', {
+              groupId: gid,
+              groupTitle: groupInfo.title || '(unnamed)',
+              tabsCreated: result.created,
+              tabsSkipped: result.skipped,
+              tabsFailed: result.failed,
+            }, cid);
+          } catch (err) {
+            logger.warn('Failed to bookmark gone group', {
+              groupId: gid,
+              error: err.message,
+              errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
+            }, cid);
+          }
+        }
+      }
+
       const closedIds = await closeGoneGroups(wid, goneGroupIds, tabMeta, windowState);
       for (const id of closedIds) {
         delete tabMeta[id];
@@ -206,6 +263,8 @@ async function runEvaluationCycle(cid) {
       tabCount: Object.keys(tabMeta).length,
       transitions: transitionCount,
       goneClosed: goneTabIds.length,
+      bookmarksCreated,
+      bookmarksSkipped,
       currentActiveTimeMs: currentActiveTime,
     }, cid);
   } else {

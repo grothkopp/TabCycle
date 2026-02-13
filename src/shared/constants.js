@@ -17,10 +17,23 @@ export const STORAGE_KEYS = Object.freeze({
   ACTIVE_TIME: 'v1_activeTime',
   TAB_META: 'v1_tabMeta',
   WINDOW_STATE: 'v1_windowState',
+  BOOKMARK_STATE: 'v1_bookmarkState',
 });
 
 export const ALARM_NAME = 'tabcycle-eval';
 export const ALARM_PERIOD_MINUTES = 0.5; // 30 seconds
+
+export const DEFAULT_BOOKMARK_SETTINGS = Object.freeze({
+  BOOKMARK_ENABLED: true,
+  BOOKMARK_FOLDER_NAME: 'Closed Tabs',
+});
+
+export const BOOKMARK_BLOCKED_URLS = Object.freeze([
+  '',
+  'chrome://newtab',
+  'chrome://newtab/',
+  'about:blank',
+]);
 
 export const TIME_MODE = Object.freeze({
   ACTIVE: 'active',
@@ -38,6 +51,9 @@ export const ERROR_CODES = Object.freeze({
   ERR_ALARM_CREATE: 'ERR_ALARM_CREATE',
   ERR_SCHEMA_VALIDATION: 'ERR_SCHEMA_VALIDATION',
   ERR_RECOVERY: 'ERR_RECOVERY',
+  ERR_BOOKMARK_CREATE: 'ERR_BOOKMARK_CREATE',
+  ERR_BOOKMARK_FOLDER: 'ERR_BOOKMARK_FOLDER',
+  ERR_BOOKMARK_RENAME: 'ERR_BOOKMARK_RENAME',
 });
 
 export const SPECIAL_GROUP_TYPES = Object.freeze({
