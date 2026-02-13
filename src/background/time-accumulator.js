@@ -5,6 +5,7 @@ import { readState, batchWrite } from './state-persistence.js';
 const logger = createLogger('background');
 
 let cachedActiveTime = null;
+let loadingPromise = null;
 
 export function createDefaultActiveTime() {
   return {
@@ -25,6 +26,13 @@ export async function loadActiveTime() {
   const result = await readState([STORAGE_KEYS.ACTIVE_TIME]);
   cachedActiveTime = result[STORAGE_KEYS.ACTIVE_TIME] || null;
   return cachedActiveTime;
+}
+
+async function ensureActiveTimeLoaded() {
+  if (cachedActiveTime) return cachedActiveTime;
+  if (loadingPromise) return loadingPromise;
+  loadingPromise = recoverActiveTime().finally(() => { loadingPromise = null; });
+  return loadingPromise;
 }
 
 export async function recoverActiveTime() {
@@ -51,13 +59,8 @@ export async function recoverActiveTime() {
   return state;
 }
 
-export function handleFocusChange(windowId) {
-  if (!cachedActiveTime) {
-    logger.warn('handleFocusChange called before active time loaded', {
-      errorCode: ERROR_CODES.ERR_RECOVERY,
-    });
-    return null;
-  }
+export async function handleFocusChange(windowId) {
+  await ensureActiveTimeLoaded();
 
   const now = Date.now();
   const WINDOW_ID_NONE = chrome.windows.WINDOW_ID_NONE;
@@ -80,10 +83,8 @@ export function handleFocusChange(windowId) {
   return { ...cachedActiveTime };
 }
 
-export function getCurrentActiveTime() {
-  if (!cachedActiveTime) {
-    return 0;
-  }
+export async function getCurrentActiveTime() {
+  await ensureActiveTimeLoaded();
   let total = cachedActiveTime.accumulatedMs;
   if (cachedActiveTime.focusStartTime !== null) {
     const delta = Date.now() - cachedActiveTime.focusStartTime;
@@ -95,16 +96,12 @@ export function getCurrentActiveTime() {
 }
 
 export async function persistActiveTime() {
-  if (!cachedActiveTime) {
-    return;
-  }
+  await ensureActiveTimeLoaded();
   cachedActiveTime.lastPersistedAt = Date.now();
   await batchWrite({ [STORAGE_KEYS.ACTIVE_TIME]: { ...cachedActiveTime } });
 }
 
-export function getCachedActiveTimeState() {
-  if (!cachedActiveTime) {
-    return null;
-  }
+export async function getCachedActiveTimeState() {
+  await ensureActiveTimeLoaded();
   return { ...cachedActiveTime };
 }

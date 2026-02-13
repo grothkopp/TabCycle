@@ -114,7 +114,7 @@ async function runEvaluationCycle(cid) {
   const settings = state[STORAGE_KEYS.SETTINGS];
   const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
   const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
-  const currentActiveTime = getCurrentActiveTime();
+  const currentActiveTime = await getCurrentActiveTime();
 
   const transitions = evaluateAllTabs(tabMeta, currentActiveTime, settings);
   const transitionCount = Object.keys(transitions).length;
@@ -286,7 +286,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     }
 
     // Track the new tab in meta
-    const currentActiveTime = getCurrentActiveTime();
+    const currentActiveTime = await getCurrentActiveTime();
     const entry = createTabEntry(tab, currentActiveTime);
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
@@ -398,7 +398,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         delete tabMeta[String(tabId)];
         logger.debug('Tab pinned, removed from tracking', { tabId }, cid);
       } else {
-        const currentActiveTime = getCurrentActiveTime();
+        const currentActiveTime = await getCurrentActiveTime();
         tabMeta[tabId] = createTabEntry(tab, currentActiveTime);
         logger.debug('Tab unpinned, added as fresh green', { tabId }, cid);
       }
@@ -441,7 +441,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
       logger.debug('Navigation for untracked tab, skipping', { tabId: details.tabId }, cid);
       return;
     }
-    const currentActiveTime = getCurrentActiveTime();
+    const currentActiveTime = await getCurrentActiveTime();
     const updated = handleNavigation(existing, currentActiveTime);
     tabMeta[details.tabId] = updated;
     // If tab was in a special group, ungroup it (navigating resets to green)
@@ -475,7 +475,7 @@ chrome.webNavigation.onCommitted.addListener(async (details) => {
 chrome.windows.onFocusChanged.addListener(async (windowId) => {
   const cid = logger.correlationId();
   try {
-    const updatedState = handleFocusChange(windowId);
+    const updatedState = await handleFocusChange(windowId);
     if (updatedState) {
       await persistActiveTime();
     }
@@ -613,7 +613,7 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
 async function scanExistingTabs(cid) {
   try {
     const tabs = await chrome.tabs.query({});
-    const currentActiveTime = getCurrentActiveTime();
+    const currentActiveTime = await getCurrentActiveTime();
     const now = Date.now();
     const tabMeta = {};
 
@@ -648,7 +648,7 @@ async function reconcileState(cid) {
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
     const storedTabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const storedWindowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
-    const currentActiveTime = getCurrentActiveTime();
+    const currentActiveTime = await getCurrentActiveTime();
     const now = Date.now();
 
     const chromeTabIds = new Set(chromeTabs.map((t) => t.id));

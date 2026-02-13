@@ -47,7 +47,7 @@ describe('service-worker restart integration', () => {
 
   it('should recover active time delta after simulated shutdown', async () => {
     // Simulate: user was active, then service worker shuts down
-    handleFocusChange(1); // start focus
+    await handleFocusChange(1); // start focus
     await persistActiveTime();
 
     // Simulate 2 seconds passing during shutdown
@@ -113,7 +113,7 @@ describe('service-worker restart integration', () => {
       },
     };
 
-    handleFocusChange(1);
+    await handleFocusChange(1);
     await persistActiveTime();
 
     // Simulate shutdown gap
@@ -132,7 +132,7 @@ describe('service-worker restart integration', () => {
     ];
 
     const tabMeta = store[STORAGE_KEYS.TAB_META];
-    const activeTimeMs = getCurrentActiveTime();
+    const activeTimeMs = await getCurrentActiveTime();
     const reconciled = reconcileTabs(tabMeta, chromeTabs, activeTimeMs);
 
     expect(reconciled[1].status).toBe('yellow'); // retained
