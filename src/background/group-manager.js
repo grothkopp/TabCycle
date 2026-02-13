@@ -644,8 +644,10 @@ export async function dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowSt
       if (isSpecialGroup(group.id, windowId, windowState)) continue;
       // Only dissolve groups created by our extension
       if (!extensionCreatedGroups.has(group.id)) continue;
-      // Only dissolve groups with no title (empty string or undefined)
-      if (group.title) continue;
+      // Only dissolve groups with no user-given title.
+      // Strip the age suffix so that groups whose only "title" is an
+      // age label like "(1m)" are still considered unnamed.
+      if (stripAgeSuffix(group.title)) continue;
 
       const tabs = await chrome.tabs.query({ groupId: group.id });
       if (tabs.length !== 1) continue;
