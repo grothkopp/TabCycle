@@ -426,22 +426,13 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
     // Re-read groups after tab moves may have created/emptied groups
     const groupsAfter = await chrome.tabGroups.query({ windowId: Number(windowId) });
 
-    // Refresh special group set — also re-discover by title/color if
-    // the windowState reference was lost (e.g. after service worker restart)
+    // Refresh special group set from windowState references only.
+    // We intentionally do NOT re-discover by title/color — a user group
+    // that happens to match (e.g. "Yellow"/yellow) must never be hijacked.
     const specialAfter = new Set();
     for (const g of groupsAfter) {
       if (isSpecialGroup(g.id, windowId, windowState)) {
         specialAfter.add(g.id);
-      } else if (g.title === 'Yellow' && g.color === 'yellow' && ws.specialGroups.yellow === null) {
-        // Re-register orphaned Yellow special group
-        ws.specialGroups.yellow = g.id;
-        specialAfter.add(g.id);
-        logger.info('Re-discovered orphaned Yellow special group', { windowId, groupId: g.id });
-      } else if (g.title === 'Red' && g.color === 'red' && ws.specialGroups.red === null) {
-        // Re-register orphaned Red special group
-        ws.specialGroups.red = g.id;
-        specialAfter.add(g.id);
-        logger.info('Re-discovered orphaned Red special group', { windowId, groupId: g.id });
       }
     }
 
@@ -493,11 +484,11 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
         for (const m of tabsInGroup) {
           try {
             await chrome.tabs.remove(m.tabId);
+            delete tabMeta[m.tabId];
+            delete tabMeta[String(m.tabId)];
           } catch (err) {
             logger.warn('Failed to remove tab from gone group', { tabId: m.tabId, groupId: gid, error: err.message });
           }
-          delete tabMeta[m.tabId];
-          delete tabMeta[String(m.tabId)];
         }
 
         // Clean up groupZones

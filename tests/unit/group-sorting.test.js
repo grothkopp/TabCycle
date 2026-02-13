@@ -724,9 +724,10 @@ describe('group-sorting', () => {
       expect(moveCalls[4]).toEqual([3, { index: -1 }]);   // red:3
     });
 
-    it('should re-discover orphaned Yellow special group and sort it correctly', async () => {
-      // windowState lost the Yellow reference (null), but Chrome still has the group
-      // The sort should re-discover it by title/color and sort it to the right of greens
+    it('should NOT hijack a user group named "Yellow"/yellow as a special group when special ID is null', async () => {
+      // A user created a group titled "Yellow" with color yellow.
+      // windowState.specialGroups.yellow is null (lost after restart).
+      // The sort must treat group 50 as a normal user group, NOT re-register it.
       const groups = [
         { id: 50, windowId: 1, title: 'Yellow', color: 'yellow' },
         { id: 1, windowId: 1, title: 'A', color: 'green' },
@@ -741,7 +742,7 @@ describe('group-sorting', () => {
 
       const tabMeta = {
         10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
-        20: { tabId: 20, windowId: 1, groupId: 50, status: 'yellow', isSpecialGroup: true, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 50, status: 'yellow', isSpecialGroup: false, pinned: false },
         30: { tabId: 30, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
       };
 
@@ -751,14 +752,16 @@ describe('group-sorting', () => {
 
       const result = await sortTabsAndGroups(1, tabMeta, windowState);
 
-      // Should re-discover Yellow group and re-register it
-      expect(windowState[1].specialGroups.yellow).toBe(50);
-      // Should move Yellow to the right of green groups
+      // Must NOT re-register the user group as a special group
+      expect(windowState[1].specialGroups.yellow).toBeNull();
+      // Group 50 should be sorted as a normal user group (yellow zone)
+      expect(windowState[1].groupZones[50]).toBe('yellow');
+      // Desired order: [green:1] [green:2] [yellow:50]
       expect(result.groupsMoved).toBe(3);
       const moveCalls = chrome.tabGroups.move.mock.calls;
       expect(moveCalls[0]).toEqual([1, { index: -1 }]);   // green:1
       expect(moveCalls[1]).toEqual([2, { index: -1 }]);   // green:2
-      expect(moveCalls[2]).toEqual([50, { index: -1 }]);  // Yellow special (after greens)
+      expect(moveCalls[2]).toEqual([50, { index: -1 }]);   // yellow user group (NOT special)
     });
 
     it('should never change the color of a special group', async () => {
@@ -1101,6 +1104,42 @@ describe('group-sorting', () => {
       expect(tabMeta[20]).toBeDefined();
       // Group status should be green (freshest tab)
       expect(windowState[1].groupZones[5]).toBe('green');
+    });
+
+    it('should keep tab in tabMeta when chrome.tabs.remove fails for a gone group', async () => {
+      // Tab 10 closes successfully, tab 20 fails → tab 20 must stay in tabMeta
+      const groups = [
+        { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false, url: 'https://a.com', title: 'A' },
+        { id: 20, windowId: 1, groupId: 5, pinned: false, url: 'https://b.com', title: 'B' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      chrome.tabGroups.get.mockResolvedValue({ id: 5, title: 'OldGroup', color: 'red' });
+      chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
+      chrome.tabs.remove
+        .mockResolvedValueOnce(undefined)          // tab 10 succeeds
+        .mockRejectedValueOnce(new Error('Tab is uneditable'));  // tab 20 fails
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+
+      expect(result.goneGroupsClosed).toBe(1);
+      // Tab 10 was successfully closed → removed from tabMeta
+      expect(tabMeta[10]).toBeUndefined();
+      // Tab 20 failed to close → must remain in tabMeta
+      expect(tabMeta[20]).toBeDefined();
     });
 
     it('should not bookmark gone tab when bookmarking is disabled', async () => {
