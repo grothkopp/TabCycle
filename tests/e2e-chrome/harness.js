@@ -89,6 +89,8 @@ export async function createHarness(opts = {}) {
       '--no-first-run',
       '--no-default-browser-check',
       '--disable-popup-blocking',
+      // CI runners (GitHub Actions) lack kernel sandbox support
+      ...(process.env.CI ? ['--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'] : []),
       ...(opts.extraArgs || []),
     ],
     defaultViewport: null,
