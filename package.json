@@ -8,7 +8,8 @@
     "test": "node --experimental-vm-modules node_modules/.bin/jest",
     "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/unit",
     "test:integration": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/integration",
-    "test:e2e": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/e2e"
+    "test:e2e": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/e2e/",
+    "test:e2e-chrome": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/e2e-chrome/ --testTimeout=60000 --runInBand"
   },
   "devDependencies": {
     "jest": "^29.7.0",
