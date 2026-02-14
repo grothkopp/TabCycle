@@ -96,7 +96,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
       });
       tabIds.push(id);
     }
-    await sleep(2000); // let all handlers settle
+    await sleep(4000); // let all onCreated handlers settle
 
     const meta = await h.getTabMeta();
     let tracked = 0;

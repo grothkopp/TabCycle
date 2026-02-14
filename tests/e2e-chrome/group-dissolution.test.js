@@ -73,30 +73,29 @@ describeOrSkip('Group Dissolution (real Chrome)', () => {
   }, 20_000);
 
   it('extension-created group dissolves when reduced to one tab', async () => {
-    // Simulate the extension creating a group by opening two tabs from the
-    // same context (Case 2 in tab-placer: ungrouped context → group both)
+    // Simulate the extension creating a group by opening a link from a page
+    // (Case 2 in tab-placer: ungrouped context → group both)
     const contextTabId = await h.openTab('https://example.com');
-    await sleep(300);
+    await sleep(500);
 
-    // Open a new tab with contextTab as opener → should auto-group both
-    const newTabId = await h.evalFn(async (openerId) => {
-      const tab = await chrome.tabs.create({
-        url: 'https://example.org',
-        openerTabId: openerId,
-      });
-      return tab.id;
-    }, contextTabId);
-    await sleep(1000);
+    // Open a link from the page context so Chrome sets openerTabId
+    const pages = await h.browser.pages();
+    const ctxPage = pages.find((p) => {
+      try { return p.url().includes('example.com'); } catch { return false; }
+    });
+    await ctxPage.evaluate(() => { window.open('https://example.org', '_blank'); });
+    await sleep(1500);
 
     // Verify they're grouped
     const contextTab = await h.getTab(contextTabId);
-    const newTab = await h.getTab(newTabId);
+    const allTabs = await h.queryTabs({});
+    const newTab = allTabs.find((t) => t.url?.includes('example.org'));
+    expect(newTab).toBeDefined();
     expect(contextTab.groupId).not.toBe(-1);
     expect(contextTab.groupId).toBe(newTab.groupId);
-    const groupId = contextTab.groupId;
 
     // Close one tab → group now has 1 tab → should dissolve
-    await h.closeTab(newTabId);
+    await h.closeTab(newTab.id);
     await sleep(500);
     await h.triggerEvaluation();
 

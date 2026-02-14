@@ -62,6 +62,9 @@ describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
       const [tab1, tab2] = await h.openTabs(2, 'https://example.com');
       const windowId = (await h.getTab(tab1)).windowId;
       await h.createUserGroup([tab1, tab2], 'DoomedGroup', windowId);
+      // Wait for extension to process group events and update tabMeta.groupId
+      await sleep(1000);
+      await h.triggerEvaluation();
 
       await h.backdateTab(tab1, 7000);
       await h.backdateTab(tab2, 7000);
@@ -70,7 +73,7 @@ describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
       const tabs = await h.queryTabs({});
       expect(tabs.some((t) => t.id === tab1)).toBe(false);
       expect(tabs.some((t) => t.id === tab2)).toBe(false);
-    }, 25_000);
+    }, 30_000);
   });
 
   describe('with bookmarks enabled', () => {
@@ -150,6 +153,9 @@ describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
 
       const windowId = (await h.getTab(tab1)).windowId;
       await h.createUserGroup([tab1, tab2], 'BookmarkGroup', windowId);
+      // Wait for extension to process group events and update tabMeta.groupId
+      await sleep(1000);
+      await h.triggerEvaluation();
 
       await h.backdateTab(tab1, 7000);
       await h.backdateTab(tab2, 7000);

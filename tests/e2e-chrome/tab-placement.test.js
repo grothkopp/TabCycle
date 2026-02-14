@@ -60,21 +60,24 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     const [tab1, tab2] = await h.openTabs(2, 'https://example.com');
     const windowId = (await h.getTab(tab1)).windowId;
     const groupId = await h.createUserGroup([tab1, tab2], 'TestGroup', windowId);
+    await sleep(500);
 
-    // Open a new tab with tab1 as the opener (simulating a link click)
-    const newTabId = await h.evalFn(async (openerId) => {
-      const tab = await chrome.tabs.create({
-        url: 'https://example.org',
-        openerTabId: openerId,
-      });
-      return tab.id;
-    }, tab1);
-    await sleep(800);
+    // Open a link from tab1's page context so Chrome sets openerTabId
+    const pages = await h.browser.pages();
+    const tab1Page = pages.find((p) => {
+      try { return p.url().includes('example.com'); } catch { return false; }
+    });
+    // Use window.open which sets openerTabId on the new tab
+    await tab1Page.evaluate(() => { window.open('https://example.org', '_blank'); });
+    await sleep(1500);
 
-    const newTab = await h.getTab(newTabId);
+    // Find the newly opened tab
+    const allTabs = await h.queryTabs({});
+    const newTab = allTabs.find((t) => t.url?.includes('example.org'));
+    expect(newTab).toBeDefined();
     expect(newTab.groupId).toBe(groupId);
 
-    await h.closeTab(newTabId);
+    await h.closeTab(newTab.id);
     await h.closeTab(tab1);
     await h.closeTab(tab2);
   }, 25_000);
@@ -82,25 +85,25 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
   it('new tab opened from ungrouped tab creates a new group with both', async () => {
     // Create an ungrouped tab
     const contextTabId = await h.openTab('https://example.com');
-    await sleep(300);
+    await sleep(500);
 
     // Verify it's ungrouped
     let contextTab = await h.getTab(contextTabId);
     expect(contextTab.groupId).toBe(-1);
 
-    // Open a new tab with contextTab as the opener
-    const newTabId = await h.evalFn(async (openerId) => {
-      const tab = await chrome.tabs.create({
-        url: 'https://example.org',
-        openerTabId: openerId,
-      });
-      return tab.id;
-    }, contextTabId);
-    await sleep(800);
+    // Open a link from the page context so Chrome sets openerTabId
+    const pages = await h.browser.pages();
+    const ctxPage = pages.find((p) => {
+      try { return p.url().includes('example.com'); } catch { return false; }
+    });
+    await ctxPage.evaluate(() => { window.open('https://example.org', '_blank'); });
+    await sleep(1500);
 
     // Both tabs should now be in the same group
     contextTab = await h.getTab(contextTabId);
-    const newTab = await h.getTab(newTabId);
+    const allTabs = await h.queryTabs({});
+    const newTab = allTabs.find((t) => t.url?.includes('example.org'));
+    expect(newTab).toBeDefined();
 
     expect(contextTab.groupId).not.toBe(-1);
     expect(newTab.groupId).not.toBe(-1);
@@ -110,7 +113,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     const group = await h.getGroup(contextTab.groupId);
     expect(group.color).toBe('green');
 
-    await h.closeTab(newTabId);
+    await h.closeTab(newTab.id);
     await h.closeTab(contextTabId);
   }, 25_000);
 
