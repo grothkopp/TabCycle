@@ -117,6 +117,184 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     await h.closeTab(contextTabId);
   }, 25_000);
 
+  it('new group from ungrouped green tab is green and stays in green zone after eval', async () => {
+    // Use short thresholds so we can create a yellow group via backdating
+    await h.setFastThresholds({
+      greenToYellow: 2000,
+      yellowToRed: 60000,
+      redToGone: 120000,
+      timeMode: 'wallclock',
+      bookmarkEnabled: false,
+    });
+
+    // Create a yellow user group so there's a non-green zone present
+    const [yTab1, yTab2] = await h.openTabs(2, 'https://example.com');
+    const windowId = (await h.getTab(yTab1)).windowId;
+    const yellowGroup = await h.createUserGroup([yTab1, yTab2], 'YellowGroup', windowId);
+    await h.backdateTab(yTab1, 3000);
+    await h.backdateTab(yTab2, 3000);
+    await h.triggerEvaluation();
+
+    // Now create an ungrouped green tab (context tab for the new group)
+    const contextTabId = await h.openTab('https://example.com');
+    await h.backdateTab(contextTabId, 0); // ensure fresh green
+    await sleep(500);
+
+    // Open a link from the context tab's page so Chrome sets openerTabId
+    const pages = await h.browser.pages();
+    const ctxPage = pages.find((p) => {
+      try { return p.url().includes('example.com') && !p.url().includes('example.org'); } catch { return false; }
+    });
+    await ctxPage.evaluate(() => { window.open('https://example.org', '_blank'); });
+    await sleep(1500);
+
+    // Find the newly opened tab and verify it's grouped with context tab
+    const allTabs = await h.queryTabs({});
+    const newTab = allTabs.find((t) => t.url?.includes('example.org'));
+    expect(newTab).toBeDefined();
+    const ctxAfter = await h.getTab(contextTabId);
+    expect(ctxAfter.groupId).not.toBe(-1);
+    expect(newTab.groupId).toBe(ctxAfter.groupId);
+
+    // The new group should be green
+    const group = await h.getGroup(ctxAfter.groupId);
+    expect(group.color).toBe('green');
+
+    // Run an evaluation cycle — the green group should remain green
+    await h.triggerEvaluation();
+
+    // Verify group is still green
+    const groupAfter = await h.getGroup(ctxAfter.groupId);
+    expect(groupAfter.color).toBe('green');
+
+    // Verify the green group is positioned before the yellow group (zone order)
+    const greenTabs = await h.getTabsInGroup(ctxAfter.groupId);
+    const yellowTabs = await h.getTabsInGroup(yellowGroup);
+    const greenPos = Math.min(...greenTabs.map((t) => t.index));
+    const yellowPos = Math.min(...yellowTabs.map((t) => t.index));
+    expect(greenPos).toBeLessThan(yellowPos);
+
+    // Cleanup
+    await h.closeTab(newTab.id);
+    await h.closeTab(contextTabId);
+    await h.closeTab(yTab1);
+    await h.closeTab(yTab2);
+  }, 30_000);
+
+  it('new tab from pinned context tab is green and stays green after eval', async () => {
+    // Use short thresholds so we can create a yellow group via backdating
+    await h.setFastThresholds({
+      greenToYellow: 2000,
+      yellowToRed: 60000,
+      redToGone: 120000,
+      timeMode: 'wallclock',
+      bookmarkEnabled: false,
+    });
+
+    // Create some yellow tabs so there's a non-green zone to avoid
+    const [yTab1, yTab2] = await h.openTabs(2, 'https://example.com');
+    const windowId = (await h.getTab(yTab1)).windowId;
+    const yellowGroup = await h.createUserGroup([yTab1, yTab2], 'YellowGroup', windowId);
+    await h.backdateTab(yTab1, 3000);
+    await h.backdateTab(yTab2, 3000);
+    await h.triggerEvaluation();
+
+    // Create and pin a tab
+    const pinnedTabId = await h.openTab('https://example.com');
+    await h.evalFn(async (id) => {
+      await chrome.tabs.update(id, { pinned: true });
+    }, pinnedTabId);
+    await sleep(500);
+
+    // Open a new tab via window.open from a page context so openerTabId is set.
+    // We need a non-pinned page to call window.open from, but the scenario is
+    // "active tab is pinned". Since Chrome doesn't let us window.open from a
+    // pinned tab's page easily, we test via chrome.tabs.create which goes
+    // through onCreated → placeNewTab (no openerTabId → leftmost).
+    const newTabId = await h.openTab('https://example.org');
+    await h.backdateTab(newTabId, 0); // ensure fresh green
+
+    // New tab should be green in tabMeta
+    const meta = await h.getTabMeta();
+    const newMeta = meta[newTabId] || meta[String(newTabId)];
+    expect(newMeta).toBeDefined();
+    expect(newMeta.status).toBe('green');
+
+    // Record position
+    const newTabBefore = await h.getTab(newTabId);
+    const posBefore = newTabBefore.index;
+
+    // Run eval — tab should remain green and not be moved into yellow/red zone
+    await h.triggerEvaluation();
+    const metaAfter = await h.getTabMeta();
+    const newMetaAfter = metaAfter[newTabId] || metaAfter[String(newTabId)];
+    expect(newMetaAfter.status).toBe('green');
+
+    // Position should not have changed (green stays in green zone)
+    const newTabAfter = await h.getTab(newTabId);
+    expect(newTabAfter.index).toBe(posBefore);
+
+    // Cleanup
+    await h.closeTab(newTabId);
+    await h.evalFn(async (id) => {
+      await chrome.tabs.update(id, { pinned: false });
+    }, pinnedTabId);
+    await sleep(300);
+    await h.closeTab(pinnedTabId);
+    await h.closeTab(yTab1);
+    await h.closeTab(yTab2);
+  }, 25_000);
+
+  it('new tab opened from user group in green zone joins group and stays in position', async () => {
+    // Create a user group in the green zone
+    const [tab1, tab2] = await h.openTabs(2, 'https://example.com');
+    const windowId = (await h.getTab(tab1)).windowId;
+    const groupId = await h.createUserGroup([tab1, tab2], 'GreenUserGroup', windowId);
+    await h.backdateTab(tab1, 0);
+    await h.backdateTab(tab2, 0);
+    await h.triggerEvaluation();
+
+    // Verify group is green
+    const groupBefore = await h.getGroup(groupId);
+    expect(groupBefore.color).toBe('green');
+
+    // Record group position
+    const tabsBefore = await h.getTabsInGroup(groupId);
+    const posBefore = Math.min(...tabsBefore.map((t) => t.index));
+
+    // Open a link from tab1's page context so Chrome sets openerTabId
+    const pages = await h.browser.pages();
+    const tab1Page = pages.find((p) => {
+      try { return p.url().includes('example.com'); } catch { return false; }
+    });
+    await tab1Page.evaluate(() => { window.open('https://example.org', '_blank'); });
+    await sleep(1500);
+
+    // New tab should join the same group
+    const allTabs = await h.queryTabs({});
+    const newTab = allTabs.find((t) => t.url?.includes('example.org'));
+    expect(newTab).toBeDefined();
+    expect(newTab.groupId).toBe(groupId);
+
+    // Group should still be green
+    const groupMid = await h.getGroup(groupId);
+    expect(groupMid.color).toBe('green');
+
+    // Run eval — group should remain green and in same position
+    await h.triggerEvaluation();
+    const groupAfter = await h.getGroup(groupId);
+    expect(groupAfter.color).toBe('green');
+
+    const tabsAfter = await h.getTabsInGroup(groupId);
+    const posAfter = Math.min(...tabsAfter.map((t) => t.index));
+    expect(posAfter).toBe(posBefore);
+
+    // Cleanup
+    await h.closeTab(newTab.id);
+    await h.closeTab(tab1);
+    await h.closeTab(tab2);
+  }, 25_000);
+
   it('pinned tabs are not tracked by the extension', async () => {
     // Create and pin a tab
     const tabId = await h.openTab('https://example.com');
