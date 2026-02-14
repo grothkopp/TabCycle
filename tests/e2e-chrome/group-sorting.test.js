@@ -58,8 +58,8 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     const windowId = (await h.getTab(tab1)).windowId;
     const groupId = await h.createUserGroup([tab1, tab2], 'MyGroup', windowId);
 
-    // Backdate both tabs past greenToYellow
-    await h.backdateTab(tab1, 2500);
+    // Backdate both tabs past greenToYellow (2s) but under yellowToRed (4s)
+    await h.backdateTab(tab1, 3000);
     await h.backdateTab(tab2, 3000);
     await h.triggerEvaluation();
 

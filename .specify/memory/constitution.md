@@ -23,6 +23,8 @@ Every change MUST ship with tests at the right layers: unit tests for pure logic
 integration tests for background/content-script messaging and storage behavior, and
 end-to-end tests for user-visible flows. Bug fixes MUST include a failing
 regression test before the fix. A change cannot merge while any related tests fail.
+When a test fails, always investigate whether it has caught a real bug before
+assuming the test itself is wrong — a failing test is evidence, not noise.
 This is non-negotiable because Chrome extension behavior spans isolated runtimes
 where regressions are hard to detect manually.
 

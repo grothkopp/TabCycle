@@ -793,6 +793,301 @@ describe('group-sorting', () => {
     });
   });
 
+  describe('sortTabsAndGroups – threshold change resort', () => {
+    // Scenario A: When thresholds change, tabs that were yellow under old
+    // thresholds may become green or red under new thresholds. The sort
+    // must move them to the correct special group (or ungroup them).
+
+    it('should move tab from Yellow special to ungrouped when status changes to green (threshold raised)', async () => {
+      // Tab was yellow under old thresholds, but after threshold raise its
+      // status is now green → should be ungrouped (not in Yellow special).
+      const groups = [
+        { id: 50, windowId: 1, title: 'Yellow', color: 'yellow' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 50, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 50, status: 'green', isSpecialGroup: true, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Tab is green but in Yellow special → should be moved out
+      expect(result.tabsMoved).toBe(1);
+      expect(tabMeta[10].groupId).not.toBe(50);
+    });
+
+    it('should move tab from Yellow special to Red special when status changes to red (threshold lowered)', async () => {
+      // Tab was yellow, but after threshold change its status is now red
+      // → should move from Yellow special to Red special.
+      const groups = [
+        { id: 50, windowId: 1, title: 'Yellow', color: 'yellow' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 50, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      chrome.tabs.group.mockResolvedValueOnce(60);
+      chrome.tabGroups.update.mockResolvedValueOnce({ id: 60, title: 'Red', color: 'red' });
+      chrome.tabs.query.mockImplementation(async (q) => {
+        if (q.windowId) return tabs;
+        if (q.groupId === 50) return [];
+        if (q.groupId === 60) return [{ id: 10 }];
+        return [];
+      });
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 50, status: 'red', isSpecialGroup: true, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(result.tabsMoved).toBe(1);
+      expect(tabMeta[10].groupId).toBe(60);
+      expect(tabMeta[10].isSpecialGroup).toBe(true);
+    });
+
+    it('should resort user groups when threshold change causes zone transitions', async () => {
+      // Three user groups: 1 was green, 2 was yellow, 3 was green.
+      // After threshold change: 1 is now yellow, 2 is now red, 3 stays green.
+      // Current visual: [1(yellow), 2(red), 3(green)]
+      // Desired: [green:3] [yellow:1] [red:2]
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+        { id: 2, windowId: 1, title: 'B', color: 'yellow' },
+        { id: 3, windowId: 1, title: 'C', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false, index: 0 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 1 },
+        { id: 30, windowId: 1, groupId: 3, pinned: false, index: 2 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'yellow', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'red', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 3, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'yellow', 3: 'green' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(windowState[1].groupZones[1]).toBe('yellow');
+      expect(windowState[1].groupZones[2]).toBe('red');
+      expect(windowState[1].groupZones[3]).toBe('green');
+      // Desired: [3, 1, 2], current: [1, 2, 3] → must move
+      expect(result.groupsMoved).toBe(3);
+      const moveCalls = chrome.tabGroups.move.mock.calls;
+      expect(moveCalls[0]).toEqual([3, { index: -1 }]); // green
+      expect(moveCalls[1]).toEqual([1, { index: -1 }]); // yellow
+      expect(moveCalls[2]).toEqual([2, { index: -1 }]); // red
+    });
+  });
+
+  describe('sortTabsAndGroups – refresh in user group triggers resort', () => {
+    // Scenario C: When a tab in a yellow/red user group is refreshed
+    // (navigated), its status becomes green. The group's status is
+    // recomputed (freshest tab = green) and the group moves to green zone.
+
+    it('should move yellow user group to green zone when one tab is refreshed', async () => {
+      // Group 2 was yellow (left), group 1 was yellow (right).
+      // Tab 11 in group 1 refreshed → green. Group 1 becomes green → leftmost.
+      // Current visual: [2(yellow), 1(green)]
+      // Desired: [green:1(refreshed, leftmost)] [yellow:2]
+      const groups = [
+        { id: 2, windowId: 1, title: 'News', color: 'yellow' },
+        { id: 1, windowId: 1, title: 'Research', color: 'yellow' },
+      ];
+      const tabs = [
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 0 },
+        { id: 10, windowId: 1, groupId: 1, pinned: false, index: 1 },
+        { id: 11, windowId: 1, groupId: 1, pinned: false, index: 2 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'yellow', isSpecialGroup: false, pinned: false },
+        11: { tabId: 11, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'yellow', 2: 'yellow' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Group 1 should now be green (freshest tab is green)
+      expect(windowState[1].groupZones[1]).toBe('green');
+      // Group 2 stays yellow
+      expect(windowState[1].groupZones[2]).toBe('yellow');
+      // Desired: [1, 2], current: [2, 1] → must move
+      expect(result.groupsMoved).toBe(2);
+      const moveCalls = chrome.tabGroups.move.mock.calls;
+      expect(moveCalls[0]).toEqual([1, { index: -1 }]); // newly green (leftmost)
+      expect(moveCalls[1]).toEqual([2, { index: -1 }]); // staying yellow
+    });
+
+    it('should move red user group to green zone when a tab is refreshed', async () => {
+      // Group 2 was red (right), group 1 was green (left).
+      // Tab 20 in group 2 refreshed → green. Group 2 moves to green zone leftmost.
+      // Desired: [green:2(refreshed, leftmost)] [green:1(staying)]
+      const groups = [
+        { id: 1, windowId: 1, title: 'Active', color: 'green' },
+        { id: 2, windowId: 1, title: 'OldStuff', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false, index: 0 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 1 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Group 2 should now be green (refreshed)
+      expect(windowState[1].groupZones[2]).toBe('green');
+      // Refreshed group goes to leftmost → desired: [2, 1], current: [1, 2] → must move
+      expect(result.groupsMoved).toBe(2);
+      const moveCalls = chrome.tabGroups.move.mock.calls;
+      expect(moveCalls[0]).toEqual([2, { index: -1 }]); // newly green (leftmost)
+      expect(moveCalls[1]).toEqual([1, { index: -1 }]); // staying green
+    });
+  });
+
+  describe('sortTabsAndGroups – tab dragged to different-status group', () => {
+    // Scenario D: When a user drags a green tab into a yellow group,
+    // the group's status is recomputed. If the freshest tab is now green,
+    // the group becomes green and must be resorted to the green zone.
+
+    it('should recompute group status to green when a green tab is added to yellow group', async () => {
+      // Group 1 green (left), group 2 yellow (right), group 3 yellow (right).
+      // User drags green tab 10 into group 2.
+      // Group 2 now has a green tab → status = green → leftmost.
+      // Desired: [green:2(refreshed, leftmost)] [green:1(staying)] [yellow:3]
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+        { id: 2, windowId: 1, title: 'B', color: 'yellow' },
+        { id: 3, windowId: 1, title: 'C', color: 'yellow' },
+      ];
+      const tabs = [
+        { id: 30, windowId: 1, groupId: 1, pinned: false, index: 0 },
+        { id: 10, windowId: 1, groupId: 2, pinned: false, index: 1 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 2 },
+        { id: 40, windowId: 1, groupId: 3, pinned: false, index: 3 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        40: { tabId: 40, windowId: 1, groupId: 3, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'yellow', 3: 'yellow' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Group 2 should now be green (freshest tab is green)
+      expect(windowState[1].groupZones[2]).toBe('green');
+      // Group 2 transitioned yellow→green → leftmost
+      // Desired: [2, 1, 3], current: [1, 2, 3] → must move
+      expect(result.groupsMoved).toBe(3);
+      const moveCalls = chrome.tabGroups.move.mock.calls;
+      expect(moveCalls[0]).toEqual([2, { index: -1 }]); // newly green (leftmost)
+      expect(moveCalls[1]).toEqual([1, { index: -1 }]); // staying green
+      expect(moveCalls[2]).toEqual([3, { index: -1 }]); // staying yellow
+    });
+
+    it('should recompute group status to yellow when a yellow tab is added to red group', async () => {
+      // Group 2 was red. User drags yellow tab 10 into it.
+      // Group 2 now has a yellow tab → status = yellow → moves to yellow zone.
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+        { id: 2, windowId: 1, title: 'B', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 2, pinned: false, index: 0 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 1 },
+        { id: 30, windowId: 1, groupId: 1, pinned: false, index: 2 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'red', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Group 2 should now be yellow (freshest tab is yellow)
+      expect(windowState[1].groupZones[2]).toBe('yellow');
+      // Desired: [green:1] [yellow:2]
+      expect(result.groupsMoved).toBeGreaterThan(0);
+    });
+
+    it('should keep group red when a red tab is added to another red group', async () => {
+      // Group 2 was red. User drags another red tab into it.
+      // Group 2 stays red → no zone change.
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+        { id: 2, windowId: 1, title: 'B', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 2, pinned: false, index: 0 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 1 },
+        { id: 30, windowId: 1, groupId: 1, pinned: false, index: 2 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 2, status: 'red', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'red', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(windowState[1].groupZones[2]).toBe('red');
+    });
+  });
+
   describe('sortTabsAndGroups – ungrouped tab sorting', () => {
     it('should move ungrouped yellow tab to yellow special group', async () => {
       // Tab 10 is ungrouped but status=yellow → should be moved to yellow special group

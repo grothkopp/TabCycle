@@ -203,12 +203,19 @@ export async function createHarness(opts = {}) {
      * @param {number} ageMs - How old the tab should appear (in ms)
      */
     async backdateTab(tabId, ageMs) {
-      const tabMeta = await harness.getTabMeta();
-      const meta = tabMeta[tabId] || tabMeta[String(tabId)];
-      if (!meta) throw new Error(`Tab ${tabId} not found in tabMeta`);
-      meta.refreshWallTime = Date.now() - ageMs;
-      meta.refreshActiveTime = Math.max(0, meta.refreshActiveTime - ageMs);
-      await harness.writeStorage({ [SK.TAB_META]: tabMeta });
+      // Run the read-modify-write atomically inside the service worker
+      // to avoid racing with the extension's own onUpdated/batchWrite calls.
+      const found = await cdpEvalFn(cdp, async (tid, age, storageKey) => {
+        const result = await chrome.storage.local.get([storageKey]);
+        const tabMeta = result[storageKey] || {};
+        const meta = tabMeta[tid] || tabMeta[String(tid)];
+        if (!meta) return false;
+        meta.refreshWallTime = Date.now() - age;
+        meta.refreshActiveTime = Math.max(0, meta.refreshActiveTime - age);
+        await chrome.storage.local.set({ [storageKey]: tabMeta });
+        return true;
+      }, tabId, ageMs, SK.TAB_META);
+      if (!found) throw new Error(`Tab ${tabId} not found in tabMeta`);
     },
 
     // ── Evaluation cycle trigger ────────────────────────────────────────
@@ -323,6 +330,46 @@ export async function createHarness(opts = {}) {
       return cdpEvalFn(cdp, async (gid) => {
         return chrome.tabs.query({ groupId: gid });
       }, groupId);
+    },
+
+    /** Move a tab into a different group (simulates user drag) */
+    async moveTabToGroup(tabId, groupId) {
+      await cdpEvalFn(cdp, async (tid, gid) => {
+        await chrome.tabs.group({ tabIds: [tid], groupId: gid });
+      }, tabId, groupId);
+      await sleep(300);
+    },
+
+    /** Ungroup a tab (remove from its group) */
+    async ungroupTab(tabId) {
+      await cdpEvalFn(cdp, async (tid) => {
+        await chrome.tabs.ungroup(tid);
+      }, tabId);
+      await sleep(300);
+    },
+
+    /** Move a group to a specific index (simulates user drag of group) */
+    async moveGroup(groupId, index) {
+      await cdpEvalFn(cdp, async (gid, idx) => {
+        await chrome.tabGroups.move(gid, { index: idx });
+      }, groupId, index);
+      await sleep(300);
+    },
+
+    /**
+     * Wait for the debounced _scheduleSortAndUpdate to fire and complete.
+     * The debounce is 300ms, so we wait 500ms then poll for sortUpdateRunning.
+     */
+    async waitForSortUpdate() {
+      await sleep(800);
+      // Poll for any in-flight sort or eval cycle
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const busy = await cdpEval(cdp, 'self.__evaluationCycleRunning || false');
+        if (!busy) break;
+        await sleep(200);
+      }
+      await sleep(300); // settle time for Chrome to process moves
     },
 
     // ── Bookmark helpers ────────────────────────────────────────────────
