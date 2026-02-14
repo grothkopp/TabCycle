@@ -194,6 +194,9 @@ self.__runEvaluationCycle = runEvaluationCycle;
 Object.defineProperty(self, '__evaluationCycleRunning', {
   get() { return evaluationCycleRunning; },
 });
+Object.defineProperty(self, '__sortUpdateRunning', {
+  get() { return sortUpdateRunning; },
+});
 
 async function runEvaluationCycle(cid) {
   if (evaluationCycleRunning) {

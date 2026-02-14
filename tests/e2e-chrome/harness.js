@@ -321,7 +321,34 @@ export async function createHarness(opts = {}) {
         }
         return gid;
       }, tabIds, title, windowId);
-      await sleep(300);
+      // Wait until all tabs have their groupId persisted in tabMeta.
+      // The onUpdated handler fires asynchronously for each tab and does
+      // readState → modify → batchWrite; we must wait for that to finish
+      // before any subsequent backdateTab call to avoid storage races.
+      const deadline = Date.now() + 5000;
+      while (Date.now() < deadline) {
+        const allPersisted = await cdpEvalFn(cdp, async (gid, ids, storageKey) => {
+          const result = await chrome.storage.local.get([storageKey]);
+          const tabMeta = result[storageKey] || {};
+          return ids.every((id) => {
+            const meta = tabMeta[id] || tabMeta[String(id)];
+            return meta && meta.groupId === gid;
+          });
+        }, groupId, tabIds, SK.TAB_META);
+        if (allPersisted) break;
+        await sleep(100);
+      }
+      // The onUpdated handler also calls _scheduleSortAndUpdate (300ms debounce).
+      // That sort does a full read-modify-write on tabMeta, so we must wait for
+      // it to finish before any subsequent backdateTab to avoid write races.
+      await sleep(500);
+      // Poll sortUpdateRunning to ensure the debounced sort has completed
+      const sortDeadline = Date.now() + 5000;
+      while (Date.now() < sortDeadline) {
+        const running = await cdpEval(cdp, 'self.__sortUpdateRunning || false');
+        if (!running) break;
+        await sleep(100);
+      }
       return groupId;
     },
 
