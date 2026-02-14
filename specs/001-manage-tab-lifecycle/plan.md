@@ -111,24 +111,84 @@ tests/
 │   ├── status-evaluator.test.js
 │   ├── time-accumulator.test.js
 │   ├── group-manager.test.js
+│   ├── group-sorting.test.js
 │   ├── tab-placer.test.js
 │   └── tab-tracker.test.js
-├── integration/
-│   ├── storage-persistence.test.js
-│   ├── alarm-cycle.test.js
-│   └── service-worker-restart.test.js
-└── e2e/
-    ├── tab-lifecycle.test.js
-    └── settings-change.test.js
+└── e2e-chrome/
+    ├── harness.js                    # Puppeteer + CDP harness (see Testing Strategy)
+    ├── status-transitions.test.js    # US1: Green→Yellow→Red→Gone lifecycle
+    ├── tab-grouping.test.js          # US2: Special group placement and cleanup
+    ├── tab-placement.test.js         # US3: Context-aware new tab placement
+    ├── group-sorting.test.js         # US4: Zone ordering and group color sync
+    ├── navigation-reset.test.js      # Edge case: navigation resets tab to green
+    ├── gone-and-bookmarks.test.js    # US4/002: Gone handling + bookmark creation
+    ├── settings-persistence.test.js  # Options page interaction and re-evaluation
+    ├── group-dissolution.test.js     # Unnamed group auto-dissolution
+    └── edge-cases.test.js            # Pinned tabs, rapid creation, empty state
 ```
 
-**Structure Decision**: Single-project Chrome extension layout. `src/background/` contains all service worker modules split by responsibility. `src/options/` is the settings UI. `src/shared/` holds cross-context utilities. Tests mirror the source structure at three layers. No build step needed — Chrome natively supports ES modules in MV3 service workers.
+**Structure Decision**: Single-project Chrome extension layout. `src/background/` contains all service worker modules split by responsibility. `src/options/` is the settings UI. `src/shared/` holds cross-context utilities. Tests mirror the source structure at unit and E2E layers. No build step needed — Chrome natively supports ES modules in MV3 service workers.
+
+## Testing Strategy
+
+### Unit Tests (42 tests, `npm test`)
+
+Pure logic modules tested with Jest using mocked Chrome APIs:
+- `status-evaluator.test.js` — age calculation, threshold comparison, status assignment
+- `time-accumulator.test.js` — active time tracking, window focus events
+- `group-manager.test.js` — group creation, special group lifecycle, gone handling
+- `group-sorting.test.js` — zone ordering, group color updates, dissolution
+- `tab-placer.test.js` — context-aware placement, openerTabId logic
+- `tab-tracker.test.js` — refresh time tracking, navigation detection
+
+### E2E Tests (47 tests, `npm run test:e2e-chrome`)
+
+Per constitution §I, a Puppeteer + CDP E2E suite verifies actual Chrome behavior.
+
+**Harness architecture** (`tests/e2e-chrome/harness.js`):
+- Launches Puppeteer's bundled "Chrome for Testing" with `--load-extension`
+- Connects to the service worker via CDP (`Runtime.evaluate`)
+- Deterministic evaluation: calls `self.__runEvaluationCycle()` directly (no alarm timing)
+- Polls `self.__evaluationCycleRunning` getter to wait for in-flight cycles
+- Pinned keeper tab prevents Chrome from exiting when tests close all tracked tabs
+- Clears `tabMeta` and `windowState` between tests to prevent state leakage
+- Skips settings writes when values are unchanged (avoids `storage.onChanged` races)
+- CDP session recovery via `ensureCdp()` when the service worker restarts
+
+**Extension-side hooks** (exposed on `globalThis` in `service-worker.js`):
+- `self.__runEvaluationCycle` — direct async call to the evaluation cycle
+- `self.__evaluationCycleRunning` — getter for the re-entrancy guard flag
+
+**Known timing considerations:**
+- `openTab()` sleeps 1s for `onCreated` handler to write `tabMeta`
+- Tests that need fresh tabs MUST explicitly `backdateTab(id, 0)` because opening
+  multiple tabs takes ~1s each, aging earlier tabs past short thresholds
+- Zone order tests use wide thresholds (15s/30s) to avoid aging issues with 6+ tabs
+- `openerTabId`-dependent tests use `window.open()` from a page context
+
+**Bugs discovered exclusively by E2E tests:**
+1. `chrome.tabGroups.query()` returns creation order, not visual order — fixed in
+   `group-manager.js` by sorting by minimum tab index
+2. `openerTabId` not set from service worker `chrome.tabs.create` — tests use
+   `window.open()` from page context
+3. Chrome exits when last tab closed — fixed with pinned keeper tab
+4. `storage.onChanged` fires for identical writes — fixed with settings dedup
+
+**Run command**: `npm run test:e2e-chrome`
+**When to run**: After core logic changes, Chrome API changes, before releases
+(see constitution §I for full guidance)
 
 ## Post-Phase 1 Constitution Re-check
 
 All five gates **pass** after design phase. One permission change from research:
 - **`webNavigation` added** (rationale: required for same-URL reload detection; `chrome.tabs.onUpdated` cannot detect reloads). Written rationale documented in IV above.
 - No other permission, contract, or architecture changes.
+
+## Post-Implementation Constitution Re-check (2026-02-14)
+
+Constitution §I (Mandatory Multi-Layer Testing) **pass** — E2E test suite implemented
+with 47 tests across 9 suites covering all user stories and critical edge cases.
+E2E tests discovered and led to fixes for 4 bugs that unit tests could not detect.
 
 ## Complexity Tracking
 

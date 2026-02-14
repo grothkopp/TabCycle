@@ -163,6 +163,50 @@ As a user with multiple Chrome windows, I want user-active time to be tracked gl
 - What happens when a site uses SPA navigation (pushState/replaceState) instead of full page loads? The extension detects these via `chrome.webNavigation.onHistoryStateUpdated` and treats them as refresh events, resetting the tab's age. A per-tab debounce prevents double-processing when both `onCommitted` and `onHistoryStateUpdated` fire for the same navigation.
 - What happens when a tab inside a user-created group individually reaches "gone" status but other tabs in the group are still fresh? The tab is NOT individually closed. Only the group's overall status (determined by `computeGroupStatus` — the freshest tab) determines whether the group is closed. This prevents premature closing of tabs in recently-refreshed groups.
 
+### E2E Test Considerations
+
+The following acceptance scenarios and edge cases require E2E testing with a real Chrome
+instance (Puppeteer + CDP) because they depend on actual Chrome API behavior that cannot
+be captured by unit tests with mocked APIs:
+
+- **Status transitions (US1 scenarios 1-4, 6)**: Real alarm firing, storage persistence
+  across evaluation cycles, and actual tab closure by Chrome.
+- **Tab grouping (US2 scenarios 1-6)**: Real `chrome.tabs.group()` and
+  `chrome.tabGroups` behavior, special group creation/removal, and tab movement between
+  groups.
+- **Tab placement (US3 scenarios 1-3)**: `openerTabId` propagation — unit tests cannot
+  verify this because `chrome.tabs.create` from the service worker does NOT propagate
+  `openerTabId`; tests must use `window.open()` from a page context.
+- **Group sorting (US4 scenarios 4-8)**: `chrome.tabGroups.query()` returns groups in
+  creation order, not visual order. The sorting bug where `needsMove` compared query
+  order to desired order was only discoverable via E2E tests.
+- **Gone handling with bookmarks (US4 scenario 9)**: Real bookmark creation via
+  `chrome.bookmarks.create` and actual tab/group closure.
+- **Navigation reset (edge case 1)**: Real `webNavigation.onCommitted` and
+  `onHistoryStateUpdated` events.
+- **Settings persistence**: Real options page interaction via Puppeteer page navigation.
+- **Group dissolution**: Extension-created unnamed groups dissolving when reduced to one
+  tab — requires real Chrome group lifecycle events.
+
+**Bugs discovered exclusively by E2E tests:**
+1. `chrome.tabGroups.query()` returns groups in creation order, not visual order —
+   caused `sortTabsAndGroups` to skip necessary group moves (fixed in `group-manager.js`
+   by sorting `allOrdered` by minimum tab index).
+2. `openerTabId` is not set when tabs are created via `chrome.tabs.create` from the
+   service worker — tab placement tests must use `window.open()` from a page context.
+3. Chrome exits when the last tab is closed during gone-tab tests — fixed by using a
+   pinned keeper tab that the extension ignores.
+4. `storage.onChanged` fires even when writing identical settings values — causes
+   unwanted evaluation cycles that race with test assertions.
+
+**Harness requirements:**
+- Pinned keeper tab (extension skips pinned tabs in `onCreated`)
+- `tabMeta` and `windowState` cleared between tests
+- Deterministic evaluation via `self.__runEvaluationCycle` (exposed on `globalThis`)
+- Guard polling via `self.__evaluationCycleRunning` getter
+- Wide thresholds (15s+) for tests that open many tabs (~1s per tab)
+- `window.open()` from page context for `openerTabId`-dependent tests
+
 ## Requirements *(mandatory)*
 
 ### Functional Requirements

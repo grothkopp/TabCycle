@@ -1,0 +1,43 @@
+name: Build Extension
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate manifest
+        run: node -e "const m = JSON.parse(require('fs').readFileSync('src/manifest.json','utf8')); if(!m.manifest_version||!m.name||!m.version) throw new Error('Invalid manifest');"
+
+      - name: Check required files exist
+        run: |
+          test -f src/manifest.json
+          test -f src/background/service-worker.js
+          test -f src/options/options.html
+          test -d src/images
+
+      - name: Build extension zip
+        run: |
+          mkdir -p dist
+          cd src && zip -r ../dist/tabcycle-${{ github.sha }}.zip . -x '*.DS_Store'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tabcycle-build-${{ github.sha }}
+          path: dist/tabcycle-*.zip
+          retention-days: 30
