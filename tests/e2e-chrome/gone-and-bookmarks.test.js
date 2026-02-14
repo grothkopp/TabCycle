@@ -11,8 +11,7 @@
 
 import { createHarness, sleep } from './harness.js';
 
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-const describeOrSkip = CHROME_PATH ? describe : describe.skip;
+const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
 describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
   let h;
@@ -95,7 +94,7 @@ describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
     afterEach(async () => {
       // Clean up test bookmarks
       try {
-        await h.swWorker.evaluate(async (name) => {
+        await h.evalFn(async (name) => {
           const tree = await chrome.bookmarks.getTree();
           function findFolder(nodes) {
             for (const node of nodes) {

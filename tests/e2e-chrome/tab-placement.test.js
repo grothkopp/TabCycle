@@ -9,8 +9,7 @@
 
 import { createHarness, sleep } from './harness.js';
 
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-const describeOrSkip = CHROME_PATH ? describe : describe.skip;
+const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
 describeOrSkip('Tab Placement (real Chrome)', () => {
   let h;
@@ -63,7 +62,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     const groupId = await h.createUserGroup([tab1, tab2], 'TestGroup', windowId);
 
     // Open a new tab with tab1 as the opener (simulating a link click)
-    const newTabId = await h.swWorker.evaluate(async (openerId) => {
+    const newTabId = await h.evalFn(async (openerId) => {
       const tab = await chrome.tabs.create({
         url: 'https://example.org',
         openerTabId: openerId,
@@ -90,7 +89,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     expect(contextTab.groupId).toBe(-1);
 
     // Open a new tab with contextTab as the opener
-    const newTabId = await h.swWorker.evaluate(async (openerId) => {
+    const newTabId = await h.evalFn(async (openerId) => {
       const tab = await chrome.tabs.create({
         url: 'https://example.org',
         openerTabId: openerId,
@@ -118,7 +117,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
   it('pinned tabs are not tracked by the extension', async () => {
     // Create and pin a tab
     const tabId = await h.openTab('https://example.com');
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: true });
     }, tabId);
     await sleep(500);
@@ -129,7 +128,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     expect(meta[String(tabId)]).toBeUndefined();
 
     // Unpin and cleanup
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: false });
     }, tabId);
     await sleep(500);

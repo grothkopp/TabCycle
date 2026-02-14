@@ -1,13 +1,17 @@
 /**
  * E2E Chrome Test Harness
  *
- * Launches a real Chrome instance with the TabCycle extension loaded and
- * provides helpers to interact with the extension's service worker, storage,
- * tabs, and groups via the Chrome DevTools Protocol (CDP).
+ * Launches Puppeteer's bundled "Chrome for Testing" with the TabCycle
+ * extension loaded and provides helpers to interact with the extension's
+ * service worker, storage, tabs, and groups via the Chrome DevTools
+ * Protocol (CDP).
+ *
+ * NOTE: Stable Google Chrome blocks --load-extension.  The bundled
+ * "Chrome for Testing" binary supports it.  Override with CHROME_E2E_PATH
+ * if you need a different binary (e.g. Chromium, Chrome Canary).
  *
  * Requirements:
- *   - Puppeteer (already in devDependencies)
- *   - Chrome/Chromium binary path in CHROME_PATH or PUPPETEER_EXECUTABLE_PATH
+ *   - Puppeteer (already in devDependencies — includes Chrome for Testing)
  *
  * Usage:
  *   import { createHarness } from './harness.js';
@@ -22,10 +26,6 @@ import { fileURLToPath } from 'url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = path.resolve(__dirname, '../../src');
 
-const CHROME_PATH =
-  process.env.PUPPETEER_EXECUTABLE_PATH ||
-  process.env.CHROME_PATH;
-
 // ─── Storage keys (must match src/shared/constants.js) ──────────────────────
 const SK = {
   SETTINGS: 'v1_settings',
@@ -35,19 +35,54 @@ const SK = {
   BOOKMARK_STATE: 'v1_bookmarkState',
 };
 
+// ─── CDP helper: evaluate JS in the service worker context ──────────────────
+
+/**
+ * Evaluate an async expression string in the service worker via CDP.
+ * Returns the deserialized result.
+ */
+async function cdpEval(cdp, expression) {
+  const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
+    expression,
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  if (exceptionDetails) {
+    const msg = exceptionDetails.exception?.description ||
+                exceptionDetails.text ||
+                JSON.stringify(exceptionDetails);
+    throw new Error(`CDP eval error: ${msg}`);
+  }
+  return result.value;
+}
+
+/**
+ * Evaluate an async function in the service worker, passing JSON-serialisable
+ * arguments.  Mimics puppeteer's page.evaluate(fn, ...args) API.
+ */
+async function cdpEvalFn(cdp, fn, ...args) {
+  const argList = args.map((a) => JSON.stringify(a)).join(', ');
+  const expression = `(${fn.toString()})(${argList})`;
+  return cdpEval(cdp, expression);
+}
+
 // ─── Harness Factory ────────────────────────────────────────────────────────
 
 export async function createHarness(opts = {}) {
-  if (!CHROME_PATH) {
-    throw new Error(
-      'No Chrome binary found. Set CHROME_PATH or PUPPETEER_EXECUTABLE_PATH.'
-    );
-  }
-
   const puppeteer = await import('puppeteer');
+
+  // Use Puppeteer's bundled "Chrome for Testing" which supports --load-extension.
+  // Stable Google Chrome blocks that flag.  Override with CHROME_E2E_PATH if needed.
+  const executablePath = process.env.CHROME_E2E_PATH || puppeteer.default.executablePath();
+
   const browser = await puppeteer.default.launch({
     headless: false,
-    executablePath: CHROME_PATH,
+    executablePath,
+    // Puppeteer adds --disable-extensions by default; we must remove it.
+    ignoreDefaultArgs: [
+      '--disable-extensions',
+      '--disable-component-extensions-with-background-pages',
+    ],
     args: [
       `--disable-extensions-except=${EXTENSION_PATH}`,
       `--load-extension=${EXTENSION_PATH}`,
@@ -59,32 +94,44 @@ export async function createHarness(opts = {}) {
     defaultViewport: null,
   });
 
-  // Wait for the service worker target to appear
-  const swTarget = await waitForServiceWorker(browser, 10_000);
+  // Wait for the extension's service worker target to appear.
+  // We poll browser.targets() because waitForTarget can miss targets
+  // that were created during launch() before the listener is attached.
+  const swTarget = await pollForTarget(
+    browser,
+    (t) => t.type() === 'service_worker' && t.url().startsWith('chrome-extension://'),
+    15_000
+  );
   const extensionId = new URL(swTarget.url()).hostname;
 
-  // Get a CDP session to the service worker so we can evaluate code in its context
-  const swWorker = await swTarget.worker();
+  // Open a CDP session to the service worker (let — may be reassigned by ensureCdp)
+  let cdp = await swTarget.createCDPSession();
+  await cdp.send('Runtime.enable');
 
   const harness = {
     browser,
     extensionId,
     swTarget,
-    swWorker,
+    cdp,
+
+    /** Low-level: evaluate a JS expression string in the SW context */
+    evalExpr: (expr) => cdpEval(cdp, expr),
+    /** Low-level: evaluate a function with args in the SW context */
+    evalFn: (fn, ...args) => cdpEvalFn(cdp, fn, ...args),
 
     // ── Storage helpers ─────────────────────────────────────────────────
 
     /** Read one or more keys from chrome.storage.local (runs in SW context) */
     async readStorage(keys) {
-      return swWorker.evaluate(async (ks) => {
+      return cdpEvalFn(cdp, async (ks) => {
         return chrome.storage.local.get(ks);
       }, keys);
     },
 
     /** Write to chrome.storage.local (runs in SW context) */
     async writeStorage(data) {
-      return swWorker.evaluate(async (d) => {
-        return chrome.storage.local.set(d);
+      return cdpEvalFn(cdp, async (d) => {
+        await chrome.storage.local.set(d);
       }, data);
     },
 
@@ -152,24 +199,23 @@ export async function createHarness(opts = {}) {
      * We use chrome.alarms API from the service worker context.
      */
     async triggerEvaluation() {
-      await swWorker.evaluate(async () => {
-        // Clear and recreate the alarm to force an immediate fire
+      await cdpEvalFn(cdp, async () => {
         await chrome.alarms.clear('tabcycle-eval');
         await chrome.alarms.create('tabcycle-eval', { when: Date.now() });
       });
       // Wait for the alarm handler + evaluation cycle to complete
-      await sleep(1500);
+      await sleep(2000);
     },
 
     // ── Tab helpers ─────────────────────────────────────────────────────
 
     /** Open a new tab and return its Chrome tab ID */
     async openTab(url = 'about:blank') {
-      const tabId = await swWorker.evaluate(async (u) => {
+      const tabId = await cdpEvalFn(cdp, async (u) => {
         const tab = await chrome.tabs.create({ url: u });
         return tab.id;
       }, url);
-      await sleep(500); // let onCreated handler run
+      await sleep(600); // let onCreated handler run
       return tabId;
     },
 
@@ -184,7 +230,7 @@ export async function createHarness(opts = {}) {
 
     /** Close a tab by ID */
     async closeTab(tabId) {
-      await swWorker.evaluate(async (id) => {
+      await cdpEvalFn(cdp, async (id) => {
         await chrome.tabs.remove(id);
       }, tabId);
       await sleep(300);
@@ -192,24 +238,24 @@ export async function createHarness(opts = {}) {
 
     /** Get all Chrome tabs in a window (or all windows if windowId is omitted) */
     async queryTabs(queryOpts = {}) {
-      return swWorker.evaluate(async (opts) => {
+      return cdpEvalFn(cdp, async (opts) => {
         return chrome.tabs.query(opts);
       }, queryOpts);
     },
 
     /** Get a single tab by ID */
     async getTab(tabId) {
-      return swWorker.evaluate(async (id) => {
+      return cdpEvalFn(cdp, async (id) => {
         return chrome.tabs.get(id);
       }, tabId);
     },
 
     /** Navigate a tab to a URL */
     async navigateTab(tabId, url) {
-      await swWorker.evaluate(async (id, u) => {
+      await cdpEvalFn(cdp, async (id, u) => {
         await chrome.tabs.update(id, { url: u });
       }, tabId, url);
-      await sleep(800); // let navigation handler run
+      await sleep(1000); // let navigation handler run
     },
 
     // ── Group helpers ───────────────────────────────────────────────────
@@ -217,25 +263,24 @@ export async function createHarness(opts = {}) {
     /** Get all tab groups in a window */
     async queryGroups(windowId) {
       const opts = windowId !== undefined ? { windowId } : {};
-      return swWorker.evaluate(async (o) => {
+      return cdpEvalFn(cdp, async (o) => {
         return chrome.tabGroups.query(o);
       }, opts);
     },
 
     /** Get a single group by ID */
     async getGroup(groupId) {
-      return swWorker.evaluate(async (id) => {
+      return cdpEvalFn(cdp, async (id) => {
         return chrome.tabGroups.get(id);
       }, groupId);
     },
 
     /** Create a user-named tab group from given tab IDs */
     async createUserGroup(tabIds, title, windowId) {
-      const groupId = await swWorker.evaluate(async (ids, t, wid) => {
-        const gid = await chrome.tabs.group({
-          tabIds: ids,
-          createProperties: wid !== undefined ? { windowId: wid } : undefined,
-        });
+      const groupId = await cdpEvalFn(cdp, async (ids, t, wid) => {
+        const opts = { tabIds: ids };
+        if (wid !== undefined) opts.createProperties = { windowId: wid };
+        const gid = await chrome.tabs.group(opts);
         if (t !== undefined) {
           await chrome.tabGroups.update(gid, { title: t });
         }
@@ -247,7 +292,7 @@ export async function createHarness(opts = {}) {
 
     /** Get tabs in a specific group */
     async getTabsInGroup(groupId) {
-      return swWorker.evaluate(async (gid) => {
+      return cdpEvalFn(cdp, async (gid) => {
         return chrome.tabs.query({ groupId: gid });
       }, groupId);
     },
@@ -256,7 +301,7 @@ export async function createHarness(opts = {}) {
 
     /** Get all bookmarks under a folder name */
     async getBookmarksInFolder(folderName) {
-      return swWorker.evaluate(async (name) => {
+      return cdpEvalFn(cdp, async (name) => {
         const tree = await chrome.bookmarks.getTree();
         function findFolder(nodes) {
           for (const node of nodes) {
@@ -277,7 +322,7 @@ export async function createHarness(opts = {}) {
 
     /** Get the first (main) window ID */
     async getMainWindowId() {
-      const windows = await swWorker.evaluate(async () => {
+      const windows = await cdpEvalFn(cdp, async () => {
         return chrome.windows.getAll({ windowTypes: ['normal'] });
       });
       if (windows.length === 0) throw new Error('No browser windows found');
@@ -304,26 +349,55 @@ export async function createHarness(opts = {}) {
 
     // ── Cleanup ─────────────────────────────────────────────────────────
 
-    /** Close all tabs except one (to avoid closing the window) then close browser */
+    /** Detach CDP and close the browser */
     async cleanup() {
-      try {
-        await browser.close();
-      } catch { /* ignore */ }
+      try { await cdp.detach(); } catch { /* ignore */ }
+      try { await browser.close(); } catch { /* ignore */ }
     },
 
     /**
-     * Close all non-pinned tabs except the first one, to reset state between tests.
+     * Close all tabs except a fresh about:blank, to reset state between tests.
+     * Creates a new tab first so Chrome never has zero tabs (which kills the window).
      */
     async resetTabs() {
+      await harness.ensureCdp();
+      // Create a keeper tab first
+      const keeperId = await cdpEvalFn(cdp, async () => {
+        const t = await chrome.tabs.create({ url: 'about:blank' });
+        return t.id;
+      });
+      await sleep(400);
       const tabs = await harness.queryTabs({});
-      // Keep the first tab, close the rest
-      const toClose = tabs.filter((_, i) => i > 0).map((t) => t.id);
+      const toClose = tabs.filter((t) => t.id !== keeperId).map((t) => t.id);
       if (toClose.length > 0) {
-        await swWorker.evaluate(async (ids) => {
+        await cdpEvalFn(cdp, async (ids) => {
           await chrome.tabs.remove(ids);
         }, toClose);
       }
       await sleep(500);
+    },
+
+    /**
+     * Re-establish the CDP session if the service worker has restarted.
+     */
+    async ensureCdp() {
+      try {
+        await cdp.send('Runtime.evaluate', {
+          expression: '1',
+          returnByValue: true,
+        });
+      } catch {
+        // Session is dead — find the new SW target and reconnect
+        const newSw = await pollForTarget(
+          browser,
+          (t) => t.type() === 'service_worker' && t.url().startsWith('chrome-extension://'),
+          10_000
+        );
+        harness.swTarget = newSw;
+        cdp = await newSw.createCDPSession();
+        harness.cdp = cdp;
+        await cdp.send('Runtime.enable');
+      }
     },
   };
 
@@ -339,17 +413,16 @@ export function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-async function waitForServiceWorker(browser, timeoutMs = 10000) {
+/** Poll browser.targets() until a matching target appears. */
+async function pollForTarget(browser, predicate, timeoutMs = 15000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
-    const targets = await browser.targets();
-    const sw = targets.find(
-      (t) => t.type() === 'service_worker' && t.url().includes('service-worker')
-    );
-    if (sw) return sw;
-    await sleep(200);
+    const targets = browser.targets();
+    const match = targets.find(predicate);
+    if (match) return match;
+    await sleep(300);
   }
-  throw new Error('Service worker target not found within timeout');
+  throw new Error(`Target not found within ${timeoutMs}ms`);
 }
 
 export { SK };

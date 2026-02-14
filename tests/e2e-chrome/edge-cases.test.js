@@ -11,8 +11,7 @@
 
 import { createHarness, sleep } from './harness.js';
 
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-const describeOrSkip = CHROME_PATH ? describe : describe.skip;
+const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
 describeOrSkip('Edge Cases (real Chrome)', () => {
   let h;
@@ -47,7 +46,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
     const tabId = await h.openTab('https://example.com');
 
     // Pin the tab
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: true });
     }, tabId);
     await sleep(500);
@@ -57,7 +56,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
     expect(meta[String(tabId)]).toBeUndefined();
 
     // Cleanup: unpin then close
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: false });
     }, tabId);
     await sleep(300);
@@ -68,13 +67,13 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
     const tabId = await h.openTab('https://example.com');
 
     // Pin it
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: true });
     }, tabId);
     await sleep(500);
 
     // Unpin it
-    await h.swWorker.evaluate(async (id) => {
+    await h.evalFn(async (id) => {
       await chrome.tabs.update(id, { pinned: false });
     }, tabId);
     await sleep(500);
@@ -91,7 +90,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
     // Open 10 tabs quickly
     const tabIds = [];
     for (let i = 0; i < 10; i++) {
-      const id = await h.swWorker.evaluate(async () => {
+      const id = await h.evalFn(async () => {
         const tab = await chrome.tabs.create({ url: 'about:blank' });
         return tab.id;
       });
@@ -129,7 +128,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
     // can pin it so it's removed from tracking
     const tabs = await h.queryTabs({});
     if (tabs.length > 0) {
-      await h.swWorker.evaluate(async (id) => {
+      await h.evalFn(async (id) => {
         await chrome.tabs.update(id, { pinned: true });
       }, tabs[0].id);
       await sleep(500);
@@ -146,7 +145,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
 
     // Unpin for cleanup
     if (tabs.length > 0) {
-      await h.swWorker.evaluate(async (id) => {
+      await h.evalFn(async (id) => {
         await chrome.tabs.update(id, { pinned: false });
       }, tabs[0].id);
       await sleep(300);

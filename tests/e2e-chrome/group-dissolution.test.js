@@ -8,8 +8,7 @@
 
 import { createHarness, sleep } from './harness.js';
 
-const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
-const describeOrSkip = CHROME_PATH ? describe : describe.skip;
+const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
 describeOrSkip('Group Dissolution (real Chrome)', () => {
   let h;
@@ -80,7 +79,7 @@ describeOrSkip('Group Dissolution (real Chrome)', () => {
     await sleep(300);
 
     // Open a new tab with contextTab as opener → should auto-group both
-    const newTabId = await h.swWorker.evaluate(async (openerId) => {
+    const newTabId = await h.evalFn(async (openerId) => {
       const tab = await chrome.tabs.create({
         url: 'https://example.org',
         openerTabId: openerId,
