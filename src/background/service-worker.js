@@ -189,6 +189,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// Exposed on globalThis for E2E test harness (CDP) to call directly.
+self.__runEvaluationCycle = runEvaluationCycle;
+Object.defineProperty(self, '__evaluationCycleRunning', {
+  get() { return evaluationCycleRunning; },
+});
+
 async function runEvaluationCycle(cid) {
   if (evaluationCycleRunning) {
     const elapsed = Date.now() - evaluationCycleStartedAt;

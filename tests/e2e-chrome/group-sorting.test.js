@@ -75,7 +75,9 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     const windowId = (await h.getTab(tab1)).windowId;
     const groupId = await h.createUserGroup([tab1, tab2], 'MixedGroup', windowId);
 
-    // Only backdate tab2
+    // tab1: reset to fresh (opening 2 tabs takes ~2s which ages past 2s threshold)
+    await h.backdateTab(tab1, 0);
+    // tab2: backdate past greenToYellow
     await h.backdateTab(tab2, 2500);
     await h.triggerEvaluation();
 
@@ -88,6 +90,15 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
   }, 20_000);
 
   it('groups are sorted in zone order: green before yellow before red', async () => {
+    // Use wide thresholds so opening 6 tabs (~6s) doesn't cause aging issues
+    await h.setFastThresholds({
+      greenToYellow: 15000,
+      yellowToRed: 30000,
+      redToGone: 120000,
+      timeMode: 'wallclock',
+      bookmarkEnabled: false,
+    });
+
     // Create three user groups, each with a different status
     const greenTabs = await h.openTabs(2, 'https://example.com');
     const yellowTabs = await h.openTabs(2, 'https://example.com');
@@ -99,10 +110,13 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     const yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGroup', windowId);
     const redGroup = await h.createUserGroup(redTabs, 'RedGroup', windowId);
 
-    // Backdate all tabs to their intended ages (opening 6 tabs takes ~6s)
+    // Backdate tabs with wide margins:
+    // green: fresh (0ms) — well under 15s threshold
+    // yellow: 16s — past greenToYellow(15s) but under yellowToRed(30s)
+    // red: 31s — past yellowToRed(30s) but under redToGone(120s)
     for (const id of greenTabs) await h.backdateTab(id, 0);
-    for (const id of yellowTabs) await h.backdateTab(id, 2500);
-    for (const id of redTabs) await h.backdateTab(id, 4500);
+    for (const id of yellowTabs) await h.backdateTab(id, 16000);
+    for (const id of redTabs) await h.backdateTab(id, 31000);
 
     await h.triggerEvaluation();
 

@@ -173,10 +173,19 @@ export async function createHarness(opts = {}) {
         thresholds: { greenToYellow, yellowToRed, redToGone },
         bookmarkEnabled,
       };
+      // Skip write if settings are already identical — avoids triggering
+      // storage.onChanged → runEvaluationCycle on every beforeEach.
+      const same =
+        settings.timeMode === timeMode &&
+        settings.bookmarkEnabled === bookmarkEnabled &&
+        settings.thresholds?.greenToYellow === greenToYellow &&
+        settings.thresholds?.yellowToRed === yellowToRed &&
+        settings.thresholds?.redToGone === redToGone;
+      if (same) return;
+
       await harness.writeStorage({ [SK.SETTINGS]: updated });
       // Writing settings triggers storage.onChanged → runEvaluationCycle.
-      // We must wait for that cycle to fully complete before returning,
-      // otherwise it may overwrite tabMeta values written by the test.
+      // Wait for that cycle to fully complete before returning.
       await sleep(300); // let the listener fire
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
@@ -380,6 +389,13 @@ export async function createHarness(opts = {}) {
      */
     async resetTabs() {
       await harness.ensureCdp();
+      // Wait for any in-flight eval cycle to finish first
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const running = await cdpEval(cdp, 'self.__evaluationCycleRunning || false');
+        if (!running) break;
+        await sleep(200);
+      }
       // Create a pinned keeper tab first
       const keeperId = await cdpEvalFn(cdp, async () => {
         const t = await chrome.tabs.create({ url: 'about:blank', pinned: true });
@@ -394,6 +410,9 @@ export async function createHarness(opts = {}) {
         }, toClose);
       }
       await sleep(500);
+      // Clear stale tabMeta and windowState so previous tests don't leak
+      await harness.writeStorage({ [SK.TAB_META]: {}, [SK.WINDOW_STATE]: {} });
+      await sleep(300);
     },
 
     /**

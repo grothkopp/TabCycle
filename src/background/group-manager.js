@@ -569,10 +569,20 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       desired.push({ id: redSpecialId, _special: true });
     }
 
-    // Compare current order to desired order
-    const allOrdered = groupsAfter.filter((g) =>
-      statusMap.has(g.id) || specialAfter.has(g.id)
-    );
+    // Compare current visual order to desired order.
+    // chrome.tabGroups.query returns groups in creation order, NOT visual
+    // order, so we must sort by the minimum tab index of each group's tabs.
+    const groupMinIndex = new Map();
+    for (const ct of chromeTabs) {
+      if (ct.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
+      const prev = groupMinIndex.get(ct.groupId);
+      if (prev === undefined || ct.index < prev) {
+        groupMinIndex.set(ct.groupId, ct.index);
+      }
+    }
+    const allOrdered = groupsAfter
+      .filter((g) => statusMap.has(g.id) || specialAfter.has(g.id))
+      .sort((a, b) => (groupMinIndex.get(a.id) ?? 0) - (groupMinIndex.get(b.id) ?? 0));
     const currentIds = allOrdered.map((g) => g.id);
     const desiredIds = desired.map((g) => g.id);
 
