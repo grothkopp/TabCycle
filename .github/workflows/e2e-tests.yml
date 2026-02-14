@@ -2,8 +2,7 @@ name: E2E Chrome Tests
 
 on:
   pull_request:
-    types: [opened, reopened]
-  workflow_dispatch:
+    branches: ['*']
 
 jobs:
   e2e:
