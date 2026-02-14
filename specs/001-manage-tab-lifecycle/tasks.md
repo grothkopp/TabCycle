@@ -187,6 +187,67 @@
 
 ---
 
+## Phase 10: Post-Release Improvements
+
+**Purpose**: SPA navigation detection, intra-zone ordering refinements, and gone zone architecture rework to fix premature tab closing bug.
+
+### SPA Navigation Detection (FR-036, FR-037)
+
+- [x] T054 [US1] Extract navigation handling logic from `chrome.webNavigation.onCommitted` handler in `src/background/service-worker.js` into a shared `_handleNavigationEvent(tabId, source)` function with per-tab debounce (200ms) to avoid double-processing
+- [x] T055 [US1] Add `chrome.webNavigation.onHistoryStateUpdated` listener in `src/background/service-worker.js` that calls the shared `_handleNavigationEvent` for SPA navigations (History API `pushState`/`replaceState`); filter for `frameId === 0`
+
+### Intra-Zone Ordering (FR-038)
+
+- [x] T056 [US4] Refactor `sortTabsAndGroups` in `src/background/group-manager.js` to track previous zone assignments in `windowState.groupZones`, detect zone transitions using a `justArrived` set, and place newly transitioned groups at the left of their new zone (right of special group). Refreshed green groups go to the absolute leftmost position. Non-transitioning groups retain relative order.
+- [x] T057 [US4] Add unit tests in `tests/unit/group-sorting.test.js` for intra-zone ordering: newly yellow group placed left of yellow zone right of Yellow special; newly red group placed left of red zone right of Red special; refreshed green group placed at leftmost position
+
+### Gone Zone Rework (FR-039, FR-022 update)
+
+- [x] T058 [US4] Add `gone: 3` to `STATUS_PRIORITY` in `src/background/group-manager.js` so `computeGroupStatus` can return `'gone'` when ALL tabs in a group are gone
+- [x] T059 [US4] Extend `sortTabsAndGroups` in `src/background/group-manager.js` to accept an optional `goneConfig` parameter with bookmark callbacks (`bookmarkTab`, `bookmarkGroupTabs`, `isBookmarkableUrl`, `bookmarkEnabled`, `bookmarkFolderId`). In phase 2 (ungrouped tab sort), gone tabs that are ungrouped or in special groups are bookmarked and closed individually. In phase 3 (group sort), groups where `computeGroupStatus` returns `'gone'` are bookmarked as a group and all their tabs are closed. Tabs in user groups are never individually closed for gone status.
+- [x] T060 [US4] Remove scattered gone handling from `_runEvaluationCycleInner` in `src/background/service-worker.js`: remove per-tab gone identification, per-group gone analysis, individual bookmarking loops, and `closeGoneGroups` calls. Replace with: apply ALL transitions (including gone) to `tabMeta.status`, build `goneConfig` with bookmark callbacks, pass `goneConfig` to `sortTabsAndGroups`. Remove unused `closeGoneGroups` import.
+- [x] T061 [US4] Add unit tests in `tests/unit/group-sorting.test.js` for gone zone handling: ungrouped gone tab bookmarked and closed; gone tab in special group bookmarked and closed; gone group bookmarked as a whole and all tabs closed; group with mixed statuses (some gone, some green) NOT closed; gone tab without goneConfig not closed; bookmarking disabled still closes tab
+
+**Checkpoint**: SPA navigations detected, intra-zone ordering correct, gone handling centralized in sortTabsAndGroups with group-level determination. Bug fixed: tabs in groups no longer prematurely closed.
+
+---
+
+## Phase 11: Group Age Display & Robustness Improvements
+
+**Purpose**: Display tab group age in titles, fix event handler race conditions, preserve tab ages across extension reloads, and improve state reconciliation.
+
+### Group Age Display (FR-040, FR-041)
+
+- [x] T062 [US1] Add `DEFAULT_SHOW_GROUP_AGE = false` constant to `src/shared/constants.js`
+- [x] T063 [US1] Add `formatAge(ms)` helper to `src/background/group-manager.js`: returns `"Xm"` for <60min, `"Xh"` for <24h, `"Xd"` otherwise. Minimum display is `1m`.
+- [x] T064 [US1] Add `stripAgeSuffix(title)` utility to `src/background/group-manager.js`: removes trailing `\s?(\d+[mhd])` pattern from group titles. Exported for use in bookmark-manager.
+- [x] T065 [US1] Add `computeGroupAge(groupId, tabMeta, activeTimeMs, settings)` to `src/background/group-manager.js`: computes age of the freshest (youngest) non-pinned, non-special tab in the group using `computeAge` from status-evaluator.
+- [x] T066 [US1] Add `updateGroupTitlesWithAge(windowId, tabMeta, windowState, activeTimeMs, settings)` to `src/background/group-manager.js`: queries all groups in window, skips special groups, computes group age, updates title with age suffix via `chrome.tabGroups.update()`. Shows age even for unnamed groups (just the suffix).
+- [x] T067 [US1] Add `removeAgeSuffixFromAllGroups(windowId, windowState)` to `src/background/group-manager.js`: strips age suffix from all non-special group titles (used when `showGroupAge` is disabled).
+- [x] T068 [US1] Wire `updateGroupTitlesWithAge` / `removeAgeSuffixFromAllGroups` in `src/background/service-worker.js` evaluation cycle: call after `sortTabsAndGroups`, conditioned on `settings.showGroupAge`.
+- [x] T069 [US1] Import `stripAgeSuffix` in `src/background/bookmark-manager.js` and apply it to group title before creating bookmark subfolder name (FR-041).
+- [x] T070 [US3] Add `showGroupAge` checkbox to `src/options/options.html` in a new "Group Age Display" section.
+- [x] T071 [US3] Update `loadSettings` and `saveSettings` in `src/options/options.js` to handle `showGroupAge` setting with default `false`.
+
+### Guard Flags & Race Condition Fixes (FR-042, FR-043)
+
+- [x] T072 [US4] Add `evaluationCycleRunning` guard flag to `src/background/service-worker.js`: set before evaluation cycle, cleared in `finally` block. Suppress `onRemoved`, `onMoved`, and `onUpdated` groupId handlers when flag is set.
+- [x] T073 [US4] Add `tabPlacementRunning` guard flag to `src/background/service-worker.js`: set around `placeNewTab` + `batchWrite` in `onCreated` handler. Suppress `onUpdated` groupId handler when flag is set.
+- [x] T074 [US4] Add re-entrancy guard to `runEvaluationCycle`: skip if already running (within 60s timeout). Auto-reset guard after 60s to prevent permanent lockout.
+
+### Extension Update & State Reconciliation (FR-044, FR-045, FR-046, FR-047)
+
+- [x] T075 [US6] Fix `onInstalled` handler in `src/background/service-worker.js`: use `reconcileState` on extension update (`reason: 'update'`) instead of `scanExistingTabs`. Only use `scanExistingTabs` on fresh install (`reason: 'install'`).
+- [x] T076 [US6] Add immediate `runEvaluationCycle` call after both `onInstalled` and `onStartup` handlers to ensure groups are sorted and colored immediately.
+- [x] T077 [US4] Add groupId reconciliation at start of `_runEvaluationCycleInner`: query `chrome.tabs.query({})`, compare actual groupIds with `tabMeta.groupId`, fix stale entries.
+- [x] T078 [US4] Add settings null guard at start of `_runEvaluationCycleInner`: if settings missing from storage, log error and skip cycle.
+- [x] T079 [US1] Add discarded/suspended tab detection in `_handleNavigationEvent`: check `tab.discarded` and `tab.status === 'unloaded'`, skip navigation if true.
+- [x] T080 [US6] Update `reconcileState` in `src/background/service-worker.js` to create default window state entries for windows that have tabs but no stored state.
+
+**Checkpoint**: Group age display functional, event handler races eliminated, tab ages preserved across extension reloads, state reconciliation robust.
+
+---
+
 ## Dependencies & Execution Order
 
 ### Phase Dependencies

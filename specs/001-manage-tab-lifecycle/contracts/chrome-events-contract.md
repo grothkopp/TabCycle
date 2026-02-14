@@ -48,13 +48,19 @@ This document defines which Chrome extension events the service worker listens t
 3. For each non-pinned tab in `v1_tabMeta`:
    - Compute age based on time mode (active time or wall clock)
    - Determine new status based on thresholds
-   - If status changed: execute transition (move tab, update group, close tab)
-4. For each window:
-   - Recompute group statuses (based on freshest tab)
-   - Update group colors
-   - Sort groups into zones if zone changed
-   - Manage special group lifecycle (create/remove as needed)
-5. Persist all state changes to storage in a single batch write
+   - Apply ALL status transitions to `tabMeta.status` (including gone)
+4. Build `goneConfig` with bookmark callbacks (`bookmarkTab`, `bookmarkGroupTabs`, `isBookmarkableUrl`, `bookmarkEnabled`, `bookmarkFolderId`). Resolve bookmark folder once if bookmarking is enabled and any tab has gone status.
+5. For each window:
+   - Dissolve unnamed single-tab groups
+   - Call `sortTabsAndGroups(windowId, tabMeta, windowState, goneConfig)` which:
+     - Moves ungrouped tabs to special groups (yellow/red) as needed
+     - Bookmarks and closes ungrouped/special-group gone tabs individually
+     - Computes group statuses via `computeGroupStatus` (freshest tab wins)
+     - Bookmarks and closes gone groups as a unit (all tabs gone → group gone)
+     - Sorts remaining groups into zone order with intra-zone ordering
+     - Updates group colors
+   - Update group titles with age (if enabled)
+6. Persist all state changes to storage in a single batch write
 
 ---
 
@@ -116,14 +122,34 @@ This document defines which Chrome extension events the service worker listens t
 
 **Handler responsibilities**:
 1. If `frameId !== 0`: ignore (only process main frame navigations)
-2. Update tab's `refreshActiveTime` to current `accumulatedMs`
-3. Update tab's `refreshWallTime` to `Date.now()`
-4. Set tab's `status` to `"green"`
-5. If tab is in a special "Yellow" or "Red" group:
-   - Remove tab from special group
-   - Place as ungrouped tab in green zone (or into appropriate group based on context)
-   - Check if special group is now empty → remove if so
-6. Persist to storage
+2. Call shared `_handleNavigationEvent(tabId, 'onCommitted')` with per-tab debounce (200ms) to avoid double-processing with `onHistoryStateUpdated`
+3. The shared handler:
+   - Skips discarded tabs
+   - Updates tab's `refreshActiveTime` to current `accumulatedMs`
+   - Updates tab's `refreshWallTime` to `Date.now()`
+   - Sets tab's `status` to `"green"`
+   - If tab is in a special "Yellow" or "Red" group:
+     - Removes tab from special group via `chrome.tabs.ungroup()`
+     - Checks if special group is now empty → remove if so
+   - Updates group color if tab is in a user group
+   - Calls `sortTabsAndGroups()` to re-sort
+4. Persist to storage
+
+---
+
+## Event: `chrome.webNavigation.onHistoryStateUpdated`
+
+**Trigger**: A tab's URL changes via the History API (`pushState`/`replaceState`) — SPA navigations.
+
+**Input**: `details` with `tabId`, `frameId`, `url`, `transitionType`.
+
+**Handler responsibilities**:
+1. If `frameId !== 0`: ignore (only process main frame navigations)
+2. Call shared `_handleNavigationEvent(tabId, 'onHistoryStateUpdated')` with per-tab debounce (200ms)
+3. Same shared handler logic as `onCommitted` (see above)
+4. Persist to storage
+
+**Note**: Both `onCommitted` and `onHistoryStateUpdated` may fire for the same navigation on some sites. The per-tab debounce (keyed by `tabId`, 200ms window) ensures only the first event is processed.
 
 ---
 

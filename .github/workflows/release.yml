@@ -1,0 +1,63 @@
+name: Release Extension
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          VERSION=$(node -e "console.log(JSON.parse(require('fs').readFileSync('src/manifest.json','utf8')).version)")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Extension version: $VERSION"
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ steps.version.outputs.version }} already exists. Bump the version in src/manifest.json first."
+            exit 1
+          fi
+
+      - name: Build extension zip
+        run: |
+          mkdir -p dist
+          cd src && zip -r ../dist/tabcycle-v${{ steps.version.outputs.version }}.zip . -x '*.DS_Store'
+
+      - name: Build extension crx
+        run: |
+          # Generate a temporary signing key
+          openssl genrsa 2048 > dist/key.pem 2>/dev/null
+          # Use crx3 npm package for correct CRX3 protobuf packaging
+          npx crx3 src \
+            --keyPath dist/key.pem \
+            --crxPath "dist/tabcycle-v${{ steps.version.outputs.version }}.crx" \
+            --zipPath /dev/null
+          rm -f dist/key.pem
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+          git push origin "v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: TabCycle v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/tabcycle-v${{ steps.version.outputs.version }}.zip
+            dist/tabcycle-v${{ steps.version.outputs.version }}.crx

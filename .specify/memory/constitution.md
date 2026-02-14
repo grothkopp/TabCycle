@@ -1,27 +1,20 @@
 <!--
 Sync Impact Report
-- Version change: 0.0.0 -> 1.0.0
+- Version change: 1.0.0 -> 1.1.0
 - Modified principles:
-  - Template Principle 1 -> I. Mandatory Multi-Layer Testing
-  - Template Principle 2 -> II. Structured Logging and Privacy-Safe Diagnostics
-  - Template Principle 3 -> III. Documentation Is a Release Artifact
-  - Template Principle 4 -> IV. Least-Privilege Manifest and Permission Governance
-  - Template Principle 5 -> V. Context Isolation and Contract-Driven Messaging
+  - I. Mandatory Multi-Layer Testing -> I. Mandatory Multi-Layer Testing (expanded with E2E Puppeteer mandate)
 - Added sections:
-  - Extension Architecture & Operational Constraints
-  - Development Workflow & Quality Gates
+  - E2E Testing with Puppeteer (sub-section under Principle I)
 - Removed sections:
   - None
 - Templates requiring updates:
-  - ✅ updated: .specify/templates/plan-template.md
-  - ✅ updated: .specify/templates/spec-template.md
-  - ✅ updated: .specify/templates/tasks-template.md
-  - ⚠ pending: .specify/templates/commands/*.md (directory not present)
-  - ⚠ pending: README.md (not present in repository)
+  - ✅ updated: .specify/templates/plan-template.md (E2E testing phase added)
+  - ✅ updated: .specify/templates/spec-template.md (E2E test considerations added)
+  - ⚠ pending: .specify/templates/tasks-template.md
 - Follow-up TODOs:
   - None
 -->
-# TabCycle Constitution
+# Chrome Extension Project Constitution
 
 ## Core Principles
 
@@ -30,8 +23,55 @@ Every change MUST ship with tests at the right layers: unit tests for pure logic
 integration tests for background/content-script messaging and storage behavior, and
 end-to-end tests for user-visible flows. Bug fixes MUST include a failing
 regression test before the fix. A change cannot merge while any related tests fail.
+When a test fails, always investigate whether it has caught a real bug before
+assuming the test itself is wrong — a failing test is evidence, not noise.
 This is non-negotiable because Chrome extension behavior spans isolated runtimes
 where regressions are hard to detect manually.
+
+#### E2E Testing with Puppeteer
+
+Chrome extension projects MUST include an E2E test suite that launches a real Chrome
+instance with the extension installed and observes actual outcomes via the Chrome
+DevTools Protocol (CDP). This is mandatory because unit tests with mocked Chrome APIs
+cannot catch real-world issues such as:
+- `chrome.tabGroups.query()` returning groups in creation order instead of visual order
+- `openerTabId` not propagating when tabs are created from the service worker context
+- Service worker suspension/restart invalidating CDP sessions
+- Storage write races between event handlers and evaluation cycles
+- Chrome closing when the last tab is removed during test cleanup
+
+**Architecture requirements for the E2E harness:**
+- Use Puppeteer's bundled "Chrome for Testing" binary (stable Chrome blocks
+  `--load-extension`).
+- Communicate with the extension's service worker via CDP (`Runtime.evaluate`),
+  not `page.evaluate` (which runs in page context, not the SW).
+- The extension MUST expose `self.__runEvaluationCycle` on `globalThis` so the
+  harness can trigger evaluation cycles deterministically (no alarm timing or
+  sleep-based guessing).
+- The extension MUST expose `self.__evaluationCycleRunning` (as a getter) on
+  `globalThis` so the harness can poll for in-flight cycles before triggering
+  new ones.
+- The harness MUST maintain a pinned keeper tab to prevent Chrome from exiting
+  when tests close all tracked tabs.
+- The harness MUST clear `tabMeta` and `windowState` between tests to prevent
+  state leakage.
+
+**When E2E tests MUST run:**
+- After creating or substantially changing core extension logic (service worker,
+  group management, tab placement, status evaluation, sorting).
+- After changing Chrome API usage patterns or adding new Chrome API calls.
+- After modifying the evaluation cycle, event handlers, or guard flags.
+- Before any release or version bump.
+- When debugging a behavior that unit tests cannot reproduce.
+
+**When E2E tests need NOT run:**
+- After cosmetic changes (CSS, options page layout, icon updates).
+- After documentation-only changes.
+- After changes to unit test files themselves.
+- After changes isolated to pure-logic modules with full unit test coverage.
+
+E2E tests are NOT part of the default `npm test` command. They run via a separate
+command (e.g., `npm run test:e2e-chrome`) and require a display server.
 
 ### II. Structured Logging and Privacy-Safe Diagnostics
 Runtime diagnostics MUST use structured logs with stable fields: timestamp,
@@ -110,4 +150,4 @@ Compliance expectations:
 - Exceptions MUST be documented in the implementation plan's complexity tracking with
   an expiry or follow-up task.
 
-**Version**: 1.0.0 | **Ratified**: 2026-02-12 | **Last Amended**: 2026-02-12
+**Version**: 1.1.0 | **Ratified**: 2026-02-12 | **Last Amended**: 2026-02-14

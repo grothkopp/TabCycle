@@ -51,6 +51,7 @@ No host permissions or content scripts are used.
    - **Yellow → Red threshold**: Duration before a tab turns Red (default: 8 hours)
    - **Red → Gone threshold**: Duration before a tab is closed (default: 24 hours)
 3. Thresholds can be specified in minutes, hours, or days
+   - **Show group age in title**: Toggle on/off (default: off) — appends age to group names, e.g., "News (23m)"
 
 ## How It Works
 

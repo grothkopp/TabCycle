@@ -2,6 +2,7 @@ import { STORAGE_KEYS, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import {
   validateSettings,
+  validateBookmarkState,
   validateActiveTime,
   validateTabMeta,
   validateWindowState,
@@ -14,6 +15,7 @@ const VALIDATORS = {
   [STORAGE_KEYS.ACTIVE_TIME]: validateActiveTime,
   [STORAGE_KEYS.TAB_META]: validateTabMeta,
   [STORAGE_KEYS.WINDOW_STATE]: validateWindowState,
+  [STORAGE_KEYS.BOOKMARK_STATE]: validateBookmarkState,
 };
 
 export async function readState(keys) {

@@ -20,6 +20,18 @@
 - Q: What happens when a new tab is opened while an ungrouped green tab is active? → A: Both the active tab and the new tab are placed into a newly created group with an empty name, with the new tab to the right of the active tab.
 - Q: What happens when Chrome restores tabs from a previous session? → A: Restored tabs continue with the active time they had before closing. Tab metadata (including refresh times) persists across browser restarts and session restores.
 
+### Session 2026-02-13
+
+- Q: Should SPA navigations (e.g., History API pushState/replaceState on sites like Reddit) be treated as refresh events? → A: Yes. SPA navigations via the History API should reset the tab's refresh time, just like traditional navigations. The extension listens to `chrome.webNavigation.onHistoryStateUpdated` in addition to `onCommitted` to catch these.
+- Q: When a group transitions between zones (e.g., green→yellow), where exactly should it be placed within the new zone? → A: A newly transitioned group is placed at the left of its new zone, but to the right of the special group for that zone (if it exists). A group refreshed back to green is placed at the absolute leftmost position (left of all other green groups).
+- Q: Should individual tabs inside a user-created group be closed when they individually reach "gone" status, even if the group itself is not gone? → A: No. This was a bug. Only the group's overall status (determined by `computeGroupStatus` — the freshest tab) determines whether the group is gone. If even one tab in the group is green/yellow/red, the entire group stays open. Individual tabs in user groups are never closed independently for gone status.
+- Q: Where should gone handling (bookmarking and closing) be performed? → A: Inside `sortTabsAndGroups` as a "gone" zone after red. This centralizes all zone-based logic in one function. The function accepts a `goneConfig` parameter with bookmark callbacks to avoid circular dependencies.
+- Q: Should the age of a tab group be displayed in its title? → A: Yes, optionally. When the `showGroupAge` setting is enabled (default: off), the extension appends the group's age in parentheses after the group name — e.g., "News (23m)", "Research (3h)", "Old Stuff (3d)". The age is computed from the freshest (youngest) tab in the group. When bookmarking groups, the age suffix is stripped from the folder name. The age is displayed in minutes (`m`) for <60min, hours (`h`) for <24h, days (`d`) otherwise.
+- Q: What happens when Chrome fires tab/group events (onUpdated, onMoved, onRemoved) as a side effect of the evaluation cycle's own Chrome API calls? → A: These reactive event handlers must be suppressed during the evaluation cycle to prevent stale-state writes that race with the cycle's in-memory state. An `evaluationCycleRunning` guard flag is set before the cycle runs and cleared in a `finally` block. Similarly, a `tabPlacementRunning` guard suppresses `onUpdated` groupId handling during `placeNewTab`. The evaluation cycle also has a re-entrancy guard with a 60-second timeout to prevent concurrent cycles.
+- Q: What happens when the extension is reloaded (updated) during development? → A: On extension update (`onInstalled` with `reason: 'update'`), the extension uses `reconcileState` (which preserves existing tab metadata and ages) instead of `scanExistingTabs` (which resets everything to green). `scanExistingTabs` is only used on fresh install. An immediate evaluation cycle is triggered after both install and startup.
+- Q: Should Chrome restore a suspended/discarded tab trigger a navigation event? → A: No. When Chrome restores a suspended or discarded tab, the resulting navigation should NOT reset the tab's age. The navigation handler checks `tab.discarded` and `tab.status === 'unloaded'` and skips these events.
+- Q: Can tabMeta.groupId become stale between evaluation cycles? → A: Yes. Chrome API calls from event handlers or user actions can change a tab's group without the evaluation cycle knowing. At the start of each evaluation cycle, the extension reconciles `tabMeta.groupId` values by querying `chrome.tabs.query({})` and comparing actual group IDs with stored ones.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Tab Age Tracking and Status Display (Priority: P1)
@@ -37,8 +49,10 @@ As a user with many open tabs, I want each tab to be tracked by how long it has 
 3. **Given** a tab with status Yellow whose tracked age exceeds the Yellow threshold, **When** the extension evaluates its status, **Then** the tab transitions to Red.
 4. **Given** a tab with status Red whose tracked age exceeds the Red threshold, **When** the extension evaluates its status, **Then** the tab transitions to Gone and is closed.
 5. **Given** a tab group containing multiple tabs, **When** the extension evaluates the group's status, **Then** the group's status is determined by the newest (freshest) tab inside it.
-6. **Given** the user has been away from the browser for an extended period (e.g., a weekend), **When** the user returns, **Then** tabs have NOT all uniformly aged to Red/Gone because age tracking is based on user-active time rather than wall-clock time.
-7. **Given** a pinned tab, **When** the extension evaluates tabs, **Then** the pinned tab is completely excluded from tracking, status changes, sorting, and closing.
+6. **Given** the `showGroupAge` setting is enabled, **When** the extension evaluates a tab group, **Then** the group's title is updated to include the age of its freshest tab in parentheses (e.g., "News (23m)").
+7. **Given** the `showGroupAge` setting is disabled (default), **When** the extension evaluates a tab group, **Then** any existing age suffix is removed from the group's title.
+8. **Given** the user has been away from the browser for an extended period (e.g., a weekend), **When** the user returns, **Then** tabs have NOT all uniformly aged to Red/Gone because age tracking is based on user-active time rather than wall-clock time.
+9. **Given** a pinned tab, **When** the extension evaluates tabs, **Then** the pinned tab is completely excluded from tracking, status changes, sorting, and closing.
 
 ---
 
@@ -92,10 +106,11 @@ As a user, I want my tab groups to automatically change color based on their age
 3. **Given** a tab group whose status is Red, **When** the extension sets its color, **Then** the group color is set to red.
 4. **Given** multiple tab groups, **When** they are sorted, **Then** Green groups are positioned leftmost, Yellow groups in the middle, and Red groups rightmost.
 5. **Given** multiple Green groups, **When** a new group is created, **Then** it is placed to the left of all existing groups; existing Green groups are not re-sorted relative to each other.
-6. **Given** a Green group that transitions to Yellow, **When** it is repositioned, **Then** it moves to the left of the Yellow zone (but to the right of the special "Yellow" group if that exists and is the leftmost group of the yellow  zone).
+6. **Given** a Green group that transitions to Yellow, **When** it is repositioned, **Then** it moves to the left of the Yellow zone (but to the right of the special "Yellow" group if that exists and is the leftmost group of the yellow zone).
 7. **Given** a Yellow group that transitions to Red, **When** it is repositioned, **Then** it moves to the left of the Red zone (but to the right of the special "Red" group if that exists and is the leftmost group of the red zone).
-8. **Given** a Yellow or Red group that is refreshed back to Green, **When** it is repositioned, **Then** it moves to the right of the Green zone.
-9. **Given** a tab group that reaches status Gone, **When** this is detected, **Then** the group and all its tabs are closed (the special "Red" group is exempt from closing and sorting by Gone status).
+8. **Given** a Yellow or Red group that is refreshed back to Green, **When** it is repositioned, **Then** it moves to the absolute leftmost position (left of all other green groups).
+9. **Given** a tab group whose overall status (determined by its freshest tab) reaches Gone, **When** this is detected, **Then** the group and all its tabs are bookmarked (if bookmarking is enabled) and closed. The special "Yellow" and "Red" groups are exempt from closing and sorting by Gone status.
+10. **Given** a tab group where some tabs have individually reached Gone status but the group's freshest tab is still green, yellow, or red, **When** the extension evaluates the group, **Then** the group is NOT closed and no individual tabs within the group are closed for gone status. The group's status is determined by its freshest (newest) tab.
 
 ---
 
@@ -109,7 +124,7 @@ As a user, I want to retain full manual control over creating, renaming, and reo
 
 **Acceptance Scenarios**:
 
-1. **Given** the user creates a new tab group and names it, **When** TabCycle evaluates groups, **Then** the user's group name is preserved (TabCycle only changes the group color).
+1. **Given** the user creates a new tab group and names it, **When** TabCycle evaluates groups, **Then** the user's group name is preserved (TabCycle only changes the group color, and optionally appends an age suffix if `showGroupAge` is enabled).
 2. **Given** the user manually reorders Green groups, **When** TabCycle evaluates groups, **Then** the user's ordering among Green groups is preserved (no re-sorting within the same status tier).
 3. **Given** the user manually moves a tab between groups, **When** TabCycle evaluates, **Then** TabCycle does not move the tab back (it respects the user's explicit action and tracks the tab's age from its original creation/navigation time).
 
@@ -140,8 +155,57 @@ As a user with multiple Chrome windows, I want user-active time to be tracked gl
 - What happens when many tabs change status simultaneously (e.g., after returning from being away)? The extension must handle batch transitions gracefully without creating excessive visual churn or performance degradation.
 - What happens if the user creates a group manually named "Yellow" or "Red"? The extension should treat only its own specially-created groups as special. User-created groups with those names should be treated as regular groups.
 - What happens when the browser is closed and reopened? Active-time tracking state should be persisted so that tabs do not all reset to Green on restart.
+- What happens when the extension is reloaded during development? On extension update, `reconcileState` is used instead of `scanExistingTabs`, preserving existing tab ages. Only fresh installs use `scanExistingTabs`.
+- What happens when Chrome fires tab events (onUpdated, onMoved, onRemoved) as a side effect of the evaluation cycle moving groups or updating titles? These events are suppressed via guard flags (`evaluationCycleRunning`, `tabPlacementRunning`) to prevent stale-state writes that race with the cycle's in-memory state.
+- What happens when Chrome restores a suspended or discarded tab? The navigation handler detects `tab.discarded` or `tab.status === 'unloaded'` and skips the event, preserving the tab's existing age.
 - What happens if a tab in a user-created group is refreshed? The group's status is recalculated based on its newest tab; the group may change status accordingly.
 - What happens when the user changes the time-tracking mode or thresholds in settings? All existing tabs are re-evaluated against the new settings immediately. Tabs may change status (including being closed if they now exceed the Gone threshold).
+- What happens when a site uses SPA navigation (pushState/replaceState) instead of full page loads? The extension detects these via `chrome.webNavigation.onHistoryStateUpdated` and treats them as refresh events, resetting the tab's age. A per-tab debounce prevents double-processing when both `onCommitted` and `onHistoryStateUpdated` fire for the same navigation.
+- What happens when a tab inside a user-created group individually reaches "gone" status but other tabs in the group are still fresh? The tab is NOT individually closed. Only the group's overall status (determined by `computeGroupStatus` — the freshest tab) determines whether the group is closed. This prevents premature closing of tabs in recently-refreshed groups.
+
+### E2E Test Considerations
+
+The following acceptance scenarios and edge cases require E2E testing with a real Chrome
+instance (Puppeteer + CDP) because they depend on actual Chrome API behavior that cannot
+be captured by unit tests with mocked APIs:
+
+- **Status transitions (US1 scenarios 1-4, 6)**: Real alarm firing, storage persistence
+  across evaluation cycles, and actual tab closure by Chrome.
+- **Tab grouping (US2 scenarios 1-6)**: Real `chrome.tabs.group()` and
+  `chrome.tabGroups` behavior, special group creation/removal, and tab movement between
+  groups.
+- **Tab placement (US3 scenarios 1-3)**: `openerTabId` propagation — unit tests cannot
+  verify this because `chrome.tabs.create` from the service worker does NOT propagate
+  `openerTabId`; tests must use `window.open()` from a page context.
+- **Group sorting (US4 scenarios 4-8)**: `chrome.tabGroups.query()` returns groups in
+  creation order, not visual order. The sorting bug where `needsMove` compared query
+  order to desired order was only discoverable via E2E tests.
+- **Gone handling with bookmarks (US4 scenario 9)**: Real bookmark creation via
+  `chrome.bookmarks.create` and actual tab/group closure.
+- **Navigation reset (edge case 1)**: Real `webNavigation.onCommitted` and
+  `onHistoryStateUpdated` events.
+- **Settings persistence**: Real options page interaction via Puppeteer page navigation.
+- **Group dissolution**: Extension-created unnamed groups dissolving when reduced to one
+  tab — requires real Chrome group lifecycle events.
+
+**Bugs discovered exclusively by E2E tests:**
+1. `chrome.tabGroups.query()` returns groups in creation order, not visual order —
+   caused `sortTabsAndGroups` to skip necessary group moves (fixed in `group-manager.js`
+   by sorting `allOrdered` by minimum tab index).
+2. `openerTabId` is not set when tabs are created via `chrome.tabs.create` from the
+   service worker — tab placement tests must use `window.open()` from a page context.
+3. Chrome exits when the last tab is closed during gone-tab tests — fixed by using a
+   pinned keeper tab that the extension ignores.
+4. `storage.onChanged` fires even when writing identical settings values — causes
+   unwanted evaluation cycles that race with test assertions.
+
+**Harness requirements:**
+- Pinned keeper tab (extension skips pinned tabs in `onCreated`)
+- `tabMeta` and `windowState` cleared between tests
+- Deterministic evaluation via `self.__runEvaluationCycle` (exposed on `globalThis`)
+- Guard polling via `self.__evaluationCycleRunning` getter
+- Wide thresholds (15s+) for tests that open many tabs (~1s per tab)
+- `window.open()` from page context for `openerTabId`-dependent tests
 
 ## Requirements *(mandatory)*
 
@@ -162,14 +226,14 @@ As a user with multiple Chrome windows, I want user-active time to be tracked gl
 - **FR-013**: The extension MUST create the special "Yellow" group if it does not exist when a tab first needs to be placed in it, positioning it to the left of groups with Yellow status.
 - **FR-014**: The extension MUST create the special "Red" group if it does not exist when a tab first needs to be placed in it, positioning it to the left of groups with Red status.
 - **FR-015**: The extension MUST remove the special "Yellow" or "Red" group when it becomes empty.
-- **FR-016**: The extension MUST sort tab groups into status zones: Green groups leftmost, Yellow groups in the middle, Red groups rightmost.
+- **FR-016**: The extension MUST sort tab groups into status zones: Green groups leftmost, Yellow groups in the middle, Red groups rightmost. Groups that reach Gone status are handled (bookmarked and closed) within the same sorting pass.
 - **FR-017**: The extension MUST NOT re-sort groups within the same status tier (e.g., Green groups retain their user-defined or creation order relative to each other).
 - **FR-018**: When a Green group transitions to Yellow, the extension MUST move it to the left of the Yellow zone (to the right of the special "Yellow" group if it exists).
 - **FR-019**: When a Yellow group transitions to Red, the extension MUST move it to the left of the Red zone (to the right of the special "Red" group if it exists). The special "Yellow" group is exempt from this sorting.
-- **FR-020**: When a Yellow or Red group is refreshed back to Green, the extension MUST move it to the right of the Green zone.
+- **FR-020**: When a Yellow or Red group is refreshed back to Green, the extension MUST move it to the absolute leftmost position (left of all other Green groups).
 - **FR-021**: The special "Red" and "Yellow" groups MUST NOT have a group-level status, MUST NOT be sorted between zones, and MUST NOT be closed as a group. They are exempt from all group-level status evaluation, color-based sorting, and Gone-triggered closing. They are only removed when they become empty (FR-015).
-- **FR-022**: When a user-created tab group reaches status Gone, the extension MUST close the group and all tabs inside it. The special "Yellow" and "Red" groups are both exempt from this behavior.
-- **FR-023**: The extension MUST allow users to retain full manual control over creating, renaming, and reordering their own tab groups. Only group colors and status-based positioning are managed by TabCycle.
+- **FR-022**: When a user-created tab group reaches status Gone (determined by `computeGroupStatus` — the freshest tab in the group), the extension MUST bookmark the group (if bookmarking is enabled) and close the group and all tabs inside it. The special "Yellow" and "Red" groups are both exempt from this behavior. Individual tabs within a user-created group MUST NOT be closed for gone status independently; only the group-level status determines closure.
+- **FR-023**: The extension MUST allow users to retain full manual control over creating, renaming, and reordering their own tab groups. Only group colors, status-based positioning, and optional age suffix display are managed by TabCycle.
 - **FR-024**: When a tab in the special "Yellow" or "Red" group is navigated (URL changes), its refresh time MUST reset and it MUST be moved back to the appropriate position as a Green tab.
 - **FR-025**: The extension MUST persist all tab metadata (refresh times, statuses) and the active-time accumulator across browser restarts and session restores. Restored tabs MUST continue with their previous active time and status, not reset to Green.
 - **FR-026**: New tab groups created by the user MUST be placed to the left of all existing groups (in the Green zone).
@@ -182,6 +246,18 @@ As a user with multiple Chrome windows, I want user-active time to be tracked gl
 - **FR-033**: When a new tab is opened while an ungrouped, non-pinned tab is active, the extension MUST create a new tab group with an empty name containing the active tab and the new tab, with the new tab positioned to the right of the active tab. The new group MUST immediately receive the Green color.
 - **FR-034**: The extension MUST handle new tab placement in the `chrome.tabs.onCreated` handler by using the new tab's `openerTabId` to identify the context tab (the tab that was active before creation). Chrome reserves Ctrl+T/Cmd+T and switches focus to the new tab before `onCreated` fires, so the context tab MUST NOT be determined by querying the currently active tab. If no `openerTabId` is available, the new tab MUST be placed at the leftmost position. If the context tab's group is stale or invalid, the extension MUST gracefully fall back to leftmost placement.
 - **FR-035**: When a new tab group is created (either by the extension or as a result of tab placement), the extension MUST immediately set its color to match its computed status (typically Green for new groups).
+- **FR-036**: The extension MUST detect SPA navigations (History API `pushState`/`replaceState`) via `chrome.webNavigation.onHistoryStateUpdated` and treat them as refresh events that reset the tab's age, in addition to traditional navigations detected via `chrome.webNavigation.onCommitted`.
+- **FR-037**: The extension MUST implement per-tab debounce for navigation events to prevent double-processing when both `onCommitted` and `onHistoryStateUpdated` fire for the same navigation within a short time window.
+- **FR-038**: When a group transitions from one zone to another (e.g., green→yellow), the extension MUST place it at the left of the new zone, but to the right of the special group for that zone (if it exists). Groups within the same zone that have not transitioned MUST retain their relative order.
+- **FR-039**: Gone handling (bookmarking and closing of gone tabs and groups) MUST be performed within the `sortTabsAndGroups` function as a "gone" zone after red. The function accepts a `goneConfig` parameter with bookmark callbacks. Ungrouped gone tabs (or gone tabs in special groups) are bookmarked and closed individually. Gone user-created groups are bookmarked as a group and all their tabs are closed.
+- **FR-040**: The extension MUST provide a settings toggle (`showGroupAge`, default: off) to display the age of each tab group in its title. When enabled, the age of the freshest tab in the group is appended in parentheses — e.g., "News (23m)", "Research (3h)", "Old Stuff (3d)". The age format uses minutes (`m`) for <60min, hours (`h`) for <24h, days (`d`) otherwise. When disabled, any existing age suffix MUST be removed from group titles.
+- **FR-041**: When bookmarking a tab group, the extension MUST strip the age suffix from the group title before using it as the bookmark subfolder name.
+- **FR-042**: The extension MUST suppress reactive event handlers (`chrome.tabs.onUpdated` groupId, `chrome.tabs.onRemoved`, `chrome.tabs.onMoved`) during the evaluation cycle using an `evaluationCycleRunning` guard flag. Similarly, a `tabPlacementRunning` guard MUST suppress `onUpdated` groupId handling during `placeNewTab`. This prevents stale-state writes that race with in-flight operations.
+- **FR-043**: The evaluation cycle MUST include a re-entrancy guard that skips concurrent invocations. A 60-second timeout auto-resets the guard to prevent permanent lockout.
+- **FR-044**: On extension update (`onInstalled` with `reason: 'update'`), the extension MUST use `reconcileState` (which preserves existing tab metadata) instead of `scanExistingTabs` (which resets all tabs to green). `scanExistingTabs` is only used on fresh install.
+- **FR-045**: At the start of each evaluation cycle, the extension MUST reconcile `tabMeta.groupId` values by querying `chrome.tabs.query({})` and comparing actual Chrome group IDs with stored values, fixing any stale entries.
+- **FR-046**: The navigation handler MUST skip events for suspended or discarded tabs (`tab.discarded` or `tab.status === 'unloaded'`) to avoid resetting their age.
+- **FR-047**: The `reconcileState` function MUST create default window state entries (with empty `specialGroups` and `groupZones`) for windows that have tabs but no stored state.
 
 ### Key Entities
 
@@ -189,6 +265,7 @@ As a user with multiple Chrome windows, I want user-active time to be tracked gl
 - **Tab Group**: A Chrome tab group containing one or more tabs. Key attributes: name, color, status (derived from newest tab), whether it is a special group ("Yellow" or "Red") or user-created.
 - **Window**: A Chrome browser window. Key attributes: own set of tabs and groups, focus state. Sorting and group management are scoped to the window; time tracking is global.
 - **Active Time Accumulator**: A single global counter that tracks how much time the user has been actively using any Chrome window (any tab in any window has focus). This value is used as the age measure for all tabs across all windows.
+- **Group Age Display**: An optional feature that appends the age of a tab group's freshest tab to the group's title in parentheses (e.g., "News (23m)"). Controlled by the `showGroupAge` setting (default: off). The age suffix is stripped when bookmarking groups.
 
 ## Success Criteria *(mandatory)*
 

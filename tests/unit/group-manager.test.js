@@ -288,6 +288,71 @@ describe('group-manager', () => {
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
     });
 
+    it('should dissolve a group whose only title is an age suffix like "(1m)"', async () => {
+      trackExtensionGroup(5);
+      chrome.tabGroups = {
+        ...chrome.tabGroups,
+        query: jest.fn(async () => [
+          { id: 5, windowId: 1, title: '(1m)', color: 'green' },
+        ]),
+      };
+      chrome.tabs.query.mockResolvedValueOnce([{ id: 10, groupId: 5, windowId: 1 }]);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, isSpecialGroup: false, pinned: false },
+      };
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      expect(result.dissolved).toBe(1);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
+      expect(tabMeta[10].groupId).toBeNull();
+    });
+
+    it('should dissolve a group with age suffix "(2h)" as title', async () => {
+      trackExtensionGroup(6);
+      chrome.tabGroups = {
+        ...chrome.tabGroups,
+        query: jest.fn(async () => [
+          { id: 6, windowId: 1, title: '(2h)', color: 'yellow' },
+        ]),
+      };
+      chrome.tabs.query.mockResolvedValueOnce([{ id: 11, groupId: 6, windowId: 1 }]);
+
+      const tabMeta = {
+        11: { tabId: 11, windowId: 1, groupId: 6, isSpecialGroup: false, pinned: false },
+      };
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      expect(result.dissolved).toBe(1);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(11);
+    });
+
+    it('should NOT dissolve a named group even if it has an age suffix', async () => {
+      trackExtensionGroup(5);
+      chrome.tabGroups = {
+        ...chrome.tabGroups,
+        query: jest.fn(async () => [
+          { id: 5, windowId: 1, title: 'My Group (3m)', color: 'green' },
+        ]),
+      };
+
+      const tabMeta = {};
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      expect(result.dissolved).toBe(0);
+      expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+      untrackExtensionGroup(5);
+    });
+
     it('should NOT dissolve special groups', async () => {
       chrome.tabGroups = {
         ...chrome.tabGroups,

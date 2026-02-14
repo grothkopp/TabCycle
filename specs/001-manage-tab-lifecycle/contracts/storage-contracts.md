@@ -107,7 +107,7 @@ Communication between the options page and service worker happens exclusively vi
 | `windowId` | `number` | Positive integer |
 | `refreshActiveTime` | `number` (ms) | ≥ 0, ≤ current accumulatedMs |
 | `refreshWallTime` | `number` (ms) | ≥ 0, ≤ Date.now() |
-| `status` | `"green" \| "yellow" \| "red"` | Tabs at "gone" are removed |
+| `status` | `"green" \| "yellow" \| "red" \| "gone"` | "gone" is transient — tab is closed by `sortTabsAndGroups` in same cycle |
 | `groupId` | `number \| null` | Chrome group ID or null |
 | `isSpecialGroup` | `boolean` | True if in special Yellow/Red group |
 | `pinned` | `boolean` | Pinned tabs are excluded from processing |
@@ -146,7 +146,7 @@ Communication between the options page and service worker happens exclusively vi
 | `windowId` (key) | `string` (number as string) | Positive integer |
 | `specialGroups.yellow` | `number \| null` | Valid group ID or null |
 | `specialGroups.red` | `number \| null` | Valid group ID or null |
-| `groupZones[groupId]` | `"green" \| "yellow" \| "red"` | Zone assignment |
+| `groupZones[groupId]` | `"green" \| "yellow" \| "red" \| "gone"` | Zone assignment ("gone" entries cleaned up after group closure) |
 
 **Read by**: service-worker.js (every evaluation cycle)
 **Written by**: service-worker.js (on group create/remove/move, on evaluation cycle)
@@ -182,7 +182,14 @@ chrome.alarms                   Service Worker              chrome.storage
      |                               |-- read v1_windowState --->|
      |                               |                           |
      |                               |-- compute status changes  |
-     |                               |-- execute tab/group moves |
+     |                               |-- apply ALL transitions   |
+     |                               |    (incl. gone) to tabMeta|
+     |                               |-- build goneConfig with   |
+     |                               |    bookmark callbacks     |
+     |                               |-- per window:             |
+     |                               |    sortTabsAndGroups()    |
+     |                               |    (zone sort + gone      |
+     |                               |     bookmark + close)     |
      |                               |                           |
      |                               |-- write v1_activeTime --->|
      |                               |-- write v1_tabMeta ------>|
@@ -208,10 +215,19 @@ chrome.tabs                     Service Worker              chrome.storage
 chrome.webNavigation            Service Worker              chrome.storage
      |                               |                           |
      |-- onCommitted (frameId=0) -->|                           |
+     |   OR                          |                           |
+     |-- onHistoryStateUpdated ---->|                           |
+     |   (SPA navigation)            |                           |
+     |                               |-- debounce (200ms/tab)    |
+     |                               |-- _handleNavigationEvent  |
      |                               |-- reset refreshActiveTime |
      |                               |-- reset refreshWallTime   |
+     |                               |-- set status = "green"    |
      |                               |-- if in special group:    |
-     |                               |     move to green zone    |
+     |                               |     ungroup tab           |
+     |                               |     remove empty special  |
+     |                               |-- update group color      |
+     |                               |-- sortTabsAndGroups()     |
      |                               |-- write v1_tabMeta ------>|
      |                               |-- write v1_windowState -->|
 ```
