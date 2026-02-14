@@ -99,7 +99,8 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     const yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGroup', windowId);
     const redGroup = await h.createUserGroup(redTabs, 'RedGroup', windowId);
 
-    // Backdate yellow and red tabs
+    // Backdate all tabs to their intended ages (opening 6 tabs takes ~6s)
+    for (const id of greenTabs) await h.backdateTab(id, 0);
     for (const id of yellowTabs) await h.backdateTab(id, 2500);
     for (const id of redTabs) await h.backdateTab(id, 4500);
 
@@ -107,8 +108,9 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
 
     // Read the groups in their current visual order (by index)
     const groups = await h.queryGroups(windowId);
+    // Titles may have age suffixes (e.g. "GreenGroup · 2s"), so use startsWith
     const userGroups = groups.filter(
-      (g) => g.title === 'GreenGroup' || g.title === 'YellowGroup' || g.title === 'RedGroup'
+      (g) => g.title?.startsWith('GreenGroup') || g.title?.startsWith('YellowGroup') || g.title?.startsWith('RedGroup')
     );
 
     // Get the first tab of each group to determine position
@@ -116,7 +118,10 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     for (const g of userGroups) {
       const tabs = await h.getTabsInGroup(g.id);
       if (tabs.length > 0) {
-        groupPositions[g.title] = Math.min(...tabs.map((t) => t.index));
+        const key = g.title?.startsWith('GreenGroup') ? 'GreenGroup'
+          : g.title?.startsWith('YellowGroup') ? 'YellowGroup'
+          : 'RedGroup';
+        groupPositions[key] = Math.min(...tabs.map((t) => t.index));
       }
     }
 

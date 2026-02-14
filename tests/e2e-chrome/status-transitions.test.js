@@ -100,9 +100,10 @@ describeOrSkip('Status Transitions (real Chrome)', () => {
   it('multiple tabs transition independently based on their age', async () => {
     const [tab1, tab2, tab3] = await h.openTabs(3, 'https://example.com');
 
-    // tab1: stays green (no backdating)
+    // tab1: stays green (reset to fresh — opening 3 tabs takes ~3s)
     // tab2: becomes yellow (2.5s old)
     // tab3: becomes red (4.5s old)
+    await h.backdateTab(tab1, 0);
     await h.backdateTab(tab2, 2500);
     await h.backdateTab(tab3, 4500);
     await h.triggerEvaluation();

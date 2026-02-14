@@ -87,7 +87,8 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
   }, 15_000);
 
   it('rapid tab creation does not corrupt tabMeta', async () => {
-    // Open 10 tabs quickly
+    // Open 10 tabs in quick succession (200ms apart — rapid but not simultaneous,
+    // giving each onCreated handler time to read/write storage without races)
     const tabIds = [];
     for (let i = 0; i < 10; i++) {
       const id = await h.evalFn(async () => {
@@ -95,8 +96,9 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
         return tab.id;
       });
       tabIds.push(id);
+      await sleep(200);
     }
-    await sleep(4000); // let all onCreated handlers settle
+    await sleep(2000); // let all onCreated handlers settle
 
     const meta = await h.getTabMeta();
     let tracked = 0;

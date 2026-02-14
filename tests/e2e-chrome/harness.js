@@ -174,8 +174,16 @@ export async function createHarness(opts = {}) {
         bookmarkEnabled,
       };
       await harness.writeStorage({ [SK.SETTINGS]: updated });
-      // Wait for storage change listener to fire
-      await sleep(300);
+      // Writing settings triggers storage.onChanged → runEvaluationCycle.
+      // We must wait for that cycle to fully complete before returning,
+      // otherwise it may overwrite tabMeta values written by the test.
+      await sleep(300); // let the listener fire
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const running = await cdpEval(cdp, 'self.__evaluationCycleRunning || false');
+        if (!running) break;
+        await sleep(200);
+      }
     },
 
     /**
@@ -195,16 +203,25 @@ export async function createHarness(opts = {}) {
     // ── Evaluation cycle trigger ────────────────────────────────────────
 
     /**
-     * Trigger the extension's evaluation cycle by firing the alarm.
-     * We use chrome.alarms API from the service worker context.
+     * Trigger the extension's evaluation cycle by calling the exposed
+     * self.__runEvaluationCycle() directly and awaiting its completion.
+     * Waits for any in-flight cycle (e.g. from storage.onChanged) to
+     * finish first, so the guard never skips our call.
      */
     async triggerEvaluation() {
+      await harness.ensureCdp();
+      // Wait for any in-flight cycle to finish (e.g. triggered by setFastThresholds)
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const running = await cdpEval(cdp, 'self.__evaluationCycleRunning || false');
+        if (!running) break;
+        await sleep(200);
+      }
       await cdpEvalFn(cdp, async () => {
-        await chrome.alarms.clear('tabcycle-eval');
-        await chrome.alarms.create('tabcycle-eval', { when: Date.now() });
+        await self.__runEvaluationCycle('e2e-test');
       });
-      // Wait for the alarm handler + evaluation cycle to complete
-      await sleep(2000);
+      // Brief settle time for Chrome to finish processing tab/group moves
+      await sleep(500);
     },
 
     // ── Tab helpers ─────────────────────────────────────────────────────
@@ -215,7 +232,7 @@ export async function createHarness(opts = {}) {
         const tab = await chrome.tabs.create({ url: u });
         return tab.id;
       }, url);
-      await sleep(600); // let onCreated handler run
+      await sleep(1000); // let onCreated handler finish writing tabMeta
       return tabId;
     },
 
@@ -356,14 +373,16 @@ export async function createHarness(opts = {}) {
     },
 
     /**
-     * Close all tabs except a fresh about:blank, to reset state between tests.
-     * Creates a new tab first so Chrome never has zero tabs (which kills the window).
+     * Close all tabs except a pinned keeper, to reset state between tests.
+     * The keeper is pinned so the extension ignores it (pinned tabs are
+     * skipped in onCreated) — it can never appear in tabMeta or be closed
+     * by the evaluation cycle, which prevents Chrome from exiting.
      */
     async resetTabs() {
       await harness.ensureCdp();
-      // Create a keeper tab first
+      // Create a pinned keeper tab first
       const keeperId = await cdpEvalFn(cdp, async () => {
-        const t = await chrome.tabs.create({ url: 'about:blank' });
+        const t = await chrome.tabs.create({ url: 'about:blank', pinned: true });
         return t.id;
       });
       await sleep(400);
