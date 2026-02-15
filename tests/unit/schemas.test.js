@@ -107,6 +107,42 @@ describe('validateSettings', () => {
     const result = validateSettings(validSettings);
     expect(result.valid).toBe(true);
   });
+
+  it('should pass with valid auto group naming settings', () => {
+    const result = validateSettings({
+      ...validSettings,
+      autoGroupNamingEnabled: true,
+      autoGroupNamingDelayMinutes: 5,
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail for non-boolean autoGroupNamingEnabled', () => {
+    const result = validateSettings({
+      ...validSettings,
+      autoGroupNamingEnabled: 'true',
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('autoGroupNamingEnabled'))).toBe(true);
+  });
+
+  it('should fail for non-integer autoGroupNamingDelayMinutes', () => {
+    const result = validateSettings({
+      ...validSettings,
+      autoGroupNamingDelayMinutes: 1.5,
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('autoGroupNamingDelayMinutes'))).toBe(true);
+  });
+
+  it('should fail for non-positive autoGroupNamingDelayMinutes', () => {
+    const result = validateSettings({
+      ...validSettings,
+      autoGroupNamingDelayMinutes: 0,
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('autoGroupNamingDelayMinutes'))).toBe(true);
+  });
 });
 
 describe('validateBookmarkState', () => {
@@ -302,5 +338,75 @@ describe('validateWindowState', () => {
   it('should pass for empty object', () => {
     const result = validateWindowState({});
     expect(result.valid).toBe(true);
+  });
+
+  it('should pass with valid groupNaming metadata', () => {
+    const result = validateWindowState({
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          99: {
+            firstUnnamedSeenAt: Date.now(),
+            lastAutoNamedAt: null,
+            lastCandidate: 'Dev Tools',
+            userEditLockUntil: Date.now() + 5000,
+          },
+        },
+      },
+    });
+    expect(result.valid).toBe(true);
+  });
+
+  it('should fail when groupNaming is not an object', () => {
+    const result = validateWindowState({
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: 'invalid',
+      },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('groupNaming'))).toBe(true);
+  });
+
+  it('should fail for invalid groupNaming timestamp fields', () => {
+    const result = validateWindowState({
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          12: {
+            firstUnnamedSeenAt: 0,
+            lastAutoNamedAt: -1,
+            lastCandidate: 'Tabs',
+            userEditLockUntil: 0,
+          },
+        },
+      },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('firstUnnamedSeenAt'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('lastAutoNamedAt'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('userEditLockUntil'))).toBe(true);
+  });
+
+  it('should fail when lastCandidate has more than two words', () => {
+    const result = validateWindowState({
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          12: {
+            firstUnnamedSeenAt: Date.now(),
+            lastAutoNamedAt: null,
+            lastCandidate: 'Too Many Words',
+            userEditLockUntil: Date.now() + 1,
+          },
+        },
+      },
+    });
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes('lastCandidate'))).toBe(true);
   });
 });

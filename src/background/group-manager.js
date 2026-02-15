@@ -1,8 +1,14 @@
 import { SPECIAL_GROUP_TYPES, ERROR_CODES, STATUS } from '../shared/constants.js';
 import { computeAge } from './status-evaluator.js';
 import { createLogger } from '../shared/logger.js';
+import { generateGroupNameFromTabs } from './group-name-generator.js';
 
 const logger = createLogger('background');
+
+const AUTO_NAME_DEFAULT_DELAY_MINUTES = 5;
+const EXTENSION_TITLE_UPDATE_TTL_MS = 10_000;
+const extensionTitleUpdates = new Map(); // groupId -> { title, expiresAt }
+const extensionColorUpdates = new Map(); // groupId -> { color, expiresAt }
 
 // Track groups created by our extension (eligible for auto-dissolution)
 const extensionCreatedGroups = new Set();
@@ -109,9 +115,99 @@ function ensureWindowState(windowId, windowState) {
     windowState[key] = {
       specialGroups: { yellow: null, red: null },
       groupZones: {},
+      groupNaming: {},
     };
+  } else if (!windowState[key].groupNaming || typeof windowState[key].groupNaming !== 'object') {
+    windowState[key].groupNaming = {};
   }
   return windowState[key];
+}
+
+function asPositiveTimestamp(value, fallback) {
+  if (Number.isFinite(value) && value > 0) return value;
+  return fallback;
+}
+
+function normalizeCandidate(candidate) {
+  if (typeof candidate !== 'string') return null;
+  const words = candidate.trim().split(/\s+/).filter(Boolean).slice(0, 2);
+  if (words.length === 0) return null;
+  return words.join(' ');
+}
+
+function normalizeGroupNamingEntry(entry, nowMs) {
+  const now = asPositiveTimestamp(nowMs, Date.now());
+  return {
+    firstUnnamedSeenAt: asPositiveTimestamp(entry?.firstUnnamedSeenAt, now),
+    lastAutoNamedAt: Number.isFinite(entry?.lastAutoNamedAt) && entry.lastAutoNamedAt > 0
+      ? entry.lastAutoNamedAt
+      : null,
+    lastCandidate: normalizeCandidate(entry?.lastCandidate),
+    userEditLockUntil: asPositiveTimestamp(entry?.userEditLockUntil, now),
+  };
+}
+
+function getGroupNamingEntry(ws, groupId) {
+  return ws.groupNaming[groupId] || ws.groupNaming[String(groupId)] || null;
+}
+
+function setGroupNamingEntry(ws, groupId, entry) {
+  ws.groupNaming[String(groupId)] = entry;
+}
+
+function removeGroupNamingEntry(ws, groupId) {
+  delete ws.groupNaming[groupId];
+  delete ws.groupNaming[String(groupId)];
+}
+
+function pruneExtensionTitleUpdates(nowMs = Date.now()) {
+  for (const [groupId, entry] of extensionTitleUpdates.entries()) {
+    if (entry.expiresAt <= nowMs) {
+      extensionTitleUpdates.delete(groupId);
+    }
+  }
+}
+
+function markExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
+  pruneExtensionTitleUpdates(nowMs);
+  extensionTitleUpdates.set(groupId, {
+    title,
+    expiresAt: nowMs + EXTENSION_TITLE_UPDATE_TTL_MS,
+  });
+}
+
+function pruneExtensionColorUpdates(nowMs = Date.now()) {
+  for (const [groupId, entry] of extensionColorUpdates.entries()) {
+    if (entry.expiresAt <= nowMs) {
+      extensionColorUpdates.delete(groupId);
+    }
+  }
+}
+
+function markExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
+  pruneExtensionColorUpdates(nowMs);
+  extensionColorUpdates.set(groupId, {
+    color,
+    expiresAt: nowMs + EXTENSION_TITLE_UPDATE_TTL_MS,
+  });
+}
+
+export function consumeExpectedExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
+  pruneExtensionTitleUpdates(nowMs);
+  const entry = extensionTitleUpdates.get(groupId);
+  if (!entry) return false;
+  if (typeof title === 'string' && entry.title !== title) return false;
+  extensionTitleUpdates.delete(groupId);
+  return true;
+}
+
+export function consumeExpectedExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
+  pruneExtensionColorUpdates(nowMs);
+  const entry = extensionColorUpdates.get(groupId);
+  if (!entry) return false;
+  if (typeof color === 'string' && entry.color !== color) return false;
+  extensionColorUpdates.delete(groupId);
+  return true;
 }
 
 export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCreation) {
@@ -255,6 +351,7 @@ export function computeGroupStatus(groupId, tabMeta) {
 
 export async function updateGroupColor(groupId, status) {
   try {
+    markExtensionColorUpdate(groupId, status);
     const result = await chrome.tabGroups.update(groupId, { color: status });
     logger.debug('Updated group color', { groupId, status, resultColor: result?.color });
   } catch (err) {
@@ -743,11 +840,65 @@ export async function dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowSt
 
 // ─── Group Age Display ────────────────────────────────────────────────────────
 
-const AGE_SUFFIX_RE = /\s?\([0-9]+[mhd]\)$/;
+const AGE_SUFFIX_RE = /\s?(\([0-9]+[mhd]\))$/;
+
+export function parseGroupTitle(title) {
+  if (!title) {
+    return { baseName: '', ageSuffix: '' };
+  }
+
+  const trimmed = String(title).trim();
+  const match = trimmed.match(AGE_SUFFIX_RE);
+  if (!match) {
+    return { baseName: trimmed, ageSuffix: '' };
+  }
+
+  const ageSuffix = match[1] || '';
+  const baseName = trimmed.slice(0, match.index).trim();
+  return { baseName, ageSuffix };
+}
+
+export function composeGroupTitle(baseName, ageSuffix) {
+  const base = (baseName || '').trim();
+  const suffix = (ageSuffix || '').trim();
+  if (base && suffix) return `${base} ${suffix}`;
+  return base || suffix;
+}
+
+export function isBaseGroupNameEmpty(title) {
+  return parseGroupTitle(title).baseName.length === 0;
+}
 
 export function stripAgeSuffix(title) {
   if (!title) return title;
-  return title.replace(AGE_SUFFIX_RE, '');
+  return parseGroupTitle(title).baseName;
+}
+
+export function applyUserEditLock(windowId, group, windowState, lockMs = 15_000, nowMs = Date.now()) {
+  const ws = ensureWindowState(windowId, windowState);
+  const groupId = group?.id;
+  if (groupId === null || groupId === undefined) {
+    return { locked: false };
+  }
+
+  const { baseName } = parseGroupTitle(group?.title || '');
+  if (baseName.length > 0) {
+    removeGroupNamingEntry(ws, groupId);
+    return { locked: false, removed: true };
+  }
+
+  const now = asPositiveTimestamp(nowMs, Date.now());
+  const lockDuration = Number.isFinite(lockMs) && lockMs > 0 ? lockMs : 15_000;
+  const existing = getGroupNamingEntry(ws, groupId);
+  const entry = normalizeGroupNamingEntry(existing, now);
+  const userEditLockUntil = Math.max(entry.userEditLockUntil, now + lockDuration);
+
+  setGroupNamingEntry(ws, groupId, {
+    ...entry,
+    userEditLockUntil,
+  });
+
+  return { locked: true, userEditLockUntil };
 }
 
 export function formatAge(ms) {
@@ -771,6 +922,187 @@ export function computeGroupAge(groupId, tabMeta, activeTimeMs, settings) {
   return freshestAge === null ? 0 : freshestAge;
 }
 
+export async function autoNameEligibleGroups(windowId, tabMeta, windowState, config = {}) {
+  const ws = ensureWindowState(windowId, windowState);
+  const now = asPositiveTimestamp(config.nowMs, Date.now());
+  const enabled = config.enabled !== undefined ? Boolean(config.enabled) : true;
+  const delayMinutes = Number.isInteger(config.delayMinutes) && config.delayMinutes > 0
+    ? config.delayMinutes
+    : AUTO_NAME_DEFAULT_DELAY_MINUTES;
+  const delayMs = delayMinutes * 60_000;
+
+  const summary = {
+    named: 0,
+    skipped: 0,
+    attempted: 0,
+  };
+
+  let groups = [];
+  try {
+    groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+  } catch (err) {
+    logger.warn('Auto group naming skipped: failed to query groups', {
+      windowId,
+      error: err.message,
+    });
+    return summary;
+  }
+
+  for (const group of groups) {
+    if (isSpecialGroup(group.id, windowId, windowState)) continue;
+
+    const { baseName } = parseGroupTitle(group.title || '');
+    if (baseName.length > 0) {
+      removeGroupNamingEntry(ws, group.id);
+      continue;
+    }
+
+    const existing = getGroupNamingEntry(ws, group.id);
+    const entry = normalizeGroupNamingEntry(existing, now);
+    setGroupNamingEntry(ws, group.id, entry);
+
+    if (!enabled) {
+      summary.skipped++;
+      logger.debug('Auto group naming skipped', {
+        windowId,
+        groupId: group.id,
+        reason: 'disabled',
+      });
+      continue;
+    }
+
+    if (now < entry.userEditLockUntil) {
+      summary.skipped++;
+      logger.debug('Auto group naming skipped', {
+        windowId,
+        groupId: group.id,
+        reason: 'user-edit-lock',
+        userEditLockUntil: entry.userEditLockUntil,
+      });
+      continue;
+    }
+
+    const unnamedDurationMs = now - entry.firstUnnamedSeenAt;
+    if (unnamedDurationMs < delayMs) {
+      summary.skipped++;
+      logger.debug('Auto group naming skipped', {
+        windowId,
+        groupId: group.id,
+        reason: 'below-delay-threshold',
+        unnamedDurationMs,
+        delayMs,
+      });
+      continue;
+    }
+
+    summary.attempted++;
+
+    let groupTabs = [];
+    try {
+      groupTabs = await chrome.tabs.query({ groupId: group.id });
+    } catch (err) {
+      summary.skipped++;
+      logger.warn('Auto group naming skipped: failed to query tabs', {
+        windowId,
+        groupId: group.id,
+        error: err.message,
+      });
+      continue;
+    }
+
+    const candidate = generateGroupNameFromTabs(groupTabs.filter((tab) => !tab.pinned));
+    const candidateName = normalizeCandidate(candidate?.name) || 'Tabs';
+
+    let liveGroup = null;
+    try {
+      liveGroup = await chrome.tabGroups.get(group.id);
+    } catch (err) {
+      summary.skipped++;
+      removeGroupNamingEntry(ws, group.id);
+      logger.debug('Auto group naming skipped: group no longer exists', {
+        windowId,
+        groupId: group.id,
+        error: err.message,
+      });
+      continue;
+    }
+
+    const liveTitle = liveGroup?.title || '';
+    const { baseName: liveBaseName, ageSuffix } = parseGroupTitle(liveTitle);
+    if (liveBaseName.length > 0) {
+      summary.skipped++;
+      removeGroupNamingEntry(ws, group.id);
+      logger.info('Auto group naming decision', {
+        windowId,
+        groupId: group.id,
+        action: 'skipped',
+        reason: 'group-named-before-write',
+      });
+      continue;
+    }
+
+    const latestEntry = normalizeGroupNamingEntry(getGroupNamingEntry(ws, group.id), now);
+    setGroupNamingEntry(ws, group.id, latestEntry);
+    if (now < latestEntry.userEditLockUntil) {
+      summary.skipped++;
+      logger.info('Auto group naming decision', {
+        windowId,
+        groupId: group.id,
+        action: 'skipped',
+        reason: 'user-edit-lock-before-write',
+      });
+      continue;
+    }
+
+    const newTitle = composeGroupTitle(candidateName, ageSuffix);
+    if (!newTitle || newTitle === liveTitle) {
+      summary.skipped++;
+      setGroupNamingEntry(ws, group.id, {
+        ...latestEntry,
+        lastAutoNamedAt: now,
+        lastCandidate: candidateName,
+        userEditLockUntil: now,
+      });
+      logger.info('Auto group naming decision', {
+        windowId,
+        groupId: group.id,
+        action: 'skipped',
+        reason: 'no-title-change',
+      });
+      continue;
+    }
+
+    try {
+      markExtensionTitleUpdate(group.id, newTitle, now);
+      await chrome.tabGroups.update(group.id, { title: newTitle });
+      summary.named++;
+      setGroupNamingEntry(ws, group.id, {
+        ...latestEntry,
+        lastAutoNamedAt: now,
+        lastCandidate: candidateName,
+        userEditLockUntil: now,
+      });
+      logger.info('Auto group naming decision', {
+        windowId,
+        groupId: group.id,
+        action: 'named',
+        candidate: candidateName,
+        candidateReason: candidate.reason,
+      });
+    } catch (err) {
+      summary.skipped++;
+      logger.warn('Auto group naming failed', {
+        windowId,
+        groupId: group.id,
+        candidate: candidateName,
+        error: err.message,
+      });
+    }
+  }
+
+  return summary;
+}
+
 export async function updateGroupTitlesWithAge(windowId, tabMeta, windowState, activeTimeMs, settings) {
   let updated = 0;
   try {
@@ -782,12 +1114,13 @@ export async function updateGroupTitlesWithAge(windowId, tabMeta, windowState, a
       const age = computeGroupAge(group.id, tabMeta, activeTimeMs, settings);
       if (age === 0) continue;
 
-      const baseName = stripAgeSuffix(group.title) || '';
+      const { baseName } = parseGroupTitle(group.title);
       const ageSuffix = `(${formatAge(age)})`;
-      const newTitle = baseName ? `${baseName} ${ageSuffix}` : ageSuffix;
+      const newTitle = composeGroupTitle(baseName, ageSuffix);
 
       if (newTitle !== group.title) {
         try {
+          markExtensionTitleUpdate(group.id, newTitle);
           const result = await chrome.tabGroups.update(group.id, { title: newTitle });
           updated++;
           logger.debug('Updated group title with age', { groupId: group.id, newTitle, resultTitle: result?.title });
@@ -817,6 +1150,7 @@ export async function removeAgeSuffixFromAllGroups(windowId, windowState) {
       const baseName = stripAgeSuffix(group.title);
       if (baseName !== group.title) {
         try {
+          markExtensionTitleUpdate(group.id, baseName);
           await chrome.tabGroups.update(group.id, { title: baseName });
         } catch { /* best effort */ }
       }

@@ -36,6 +36,14 @@ export function validateSettings(obj) {
       errors.push('bookmarkFolderName must be a non-empty string');
     }
   }
+  if (obj.autoGroupNamingEnabled !== undefined && typeof obj.autoGroupNamingEnabled !== 'boolean') {
+    errors.push('autoGroupNamingEnabled must be a boolean');
+  }
+  if (obj.autoGroupNamingDelayMinutes !== undefined) {
+    if (!Number.isInteger(obj.autoGroupNamingDelayMinutes) || obj.autoGroupNamingDelayMinutes <= 0) {
+      errors.push('autoGroupNamingDelayMinutes must be a positive whole number');
+    }
+  }
   return { valid: errors.length === 0, errors };
 }
 
@@ -135,6 +143,40 @@ export function validateWindowState(obj) {
       for (const [groupId, zone] of Object.entries(state.groupZones)) {
         if (!validZones.includes(zone)) {
           errors.push(`${prefix}.groupZones[${groupId}] must be one of: ${validZones.join(', ')}`);
+        }
+      }
+    }
+
+    if (state.groupNaming !== undefined) {
+      if (!state.groupNaming || typeof state.groupNaming !== 'object') {
+        errors.push(`${prefix}.groupNaming must be an object when present`);
+      } else {
+        for (const [groupId, entry] of Object.entries(state.groupNaming)) {
+          const entryPrefix = `${prefix}.groupNaming[${groupId}]`;
+          if (!entry || typeof entry !== 'object') {
+            errors.push(`${entryPrefix} must be a non-null object`);
+            continue;
+          }
+          if (!Number.isFinite(entry.firstUnnamedSeenAt) || entry.firstUnnamedSeenAt <= 0) {
+            errors.push(`${entryPrefix}.firstUnnamedSeenAt must be a positive number`);
+          }
+          if (entry.lastAutoNamedAt !== null
+            && (!Number.isFinite(entry.lastAutoNamedAt) || entry.lastAutoNamedAt <= 0)) {
+            errors.push(`${entryPrefix}.lastAutoNamedAt must be null or a positive number`);
+          }
+          if (entry.lastCandidate !== null && entry.lastCandidate !== undefined) {
+            if (typeof entry.lastCandidate !== 'string' || entry.lastCandidate.trim().length === 0) {
+              errors.push(`${entryPrefix}.lastCandidate must be null or a non-empty string`);
+            } else {
+              const words = entry.lastCandidate.trim().split(/\s+/);
+              if (words.length > 2) {
+                errors.push(`${entryPrefix}.lastCandidate must be one or two words`);
+              }
+            }
+          }
+          if (!Number.isFinite(entry.userEditLockUntil) || entry.userEditLockUntil <= 0) {
+            errors.push(`${entryPrefix}.userEditLockUntil must be a positive number`);
+          }
         }
       }
     }

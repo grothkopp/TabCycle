@@ -1,4 +1,12 @@
-import { STORAGE_KEYS, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, ERROR_CODES } from '../shared/constants.js';
+import {
+  STORAGE_KEYS,
+  DEFAULT_THRESHOLDS,
+  DEFAULT_BOOKMARK_SETTINGS,
+  DEFAULT_AUTO_GROUP_NAMING,
+  DEFAULT_SHOW_GROUP_AGE,
+  TIME_MODE,
+  ERROR_CODES,
+} from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('options');
@@ -29,7 +37,7 @@ function friendlyToMs(value, unit) {
 
 function clearErrors() {
   document.querySelectorAll('.error').forEach((el) => { el.textContent = ''; });
-  document.querySelectorAll('.threshold-input input').forEach((el) => { el.classList.remove('invalid'); });
+  document.querySelectorAll('input.invalid').forEach((el) => { el.classList.remove('invalid'); });
 }
 
 function showError(fieldId, message) {
@@ -45,6 +53,14 @@ function showSaveStatus(message, isError) {
   statusEl.classList.toggle('error-status', isError);
   statusEl.classList.add('visible');
   setTimeout(() => statusEl.classList.remove('visible'), 2500);
+}
+
+function syncAutoNamingDelayState() {
+  const enabled = document.getElementById('autoGroupNamingEnabled').checked;
+  const row = document.querySelector('.auto-name-delay-row');
+  const input = document.getElementById('autoGroupNamingDelayMinutes');
+  if (row) row.classList.toggle('disabled', !enabled);
+  if (input) input.disabled = !enabled;
 }
 
 async function loadSettings() {
@@ -78,6 +94,17 @@ async function loadSettings() {
       ? settings.showGroupAge
       : DEFAULT_SHOW_GROUP_AGE;
     document.getElementById('showGroupAge').checked = showGroupAge;
+
+    const autoGroupNamingEnabled = typeof settings.autoGroupNamingEnabled === 'boolean'
+      ? settings.autoGroupNamingEnabled
+      : DEFAULT_AUTO_GROUP_NAMING.ENABLED;
+    const autoGroupNamingDelayMinutes = Number.isInteger(settings.autoGroupNamingDelayMinutes)
+      && settings.autoGroupNamingDelayMinutes > 0
+      ? settings.autoGroupNamingDelayMinutes
+      : DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES;
+    document.getElementById('autoGroupNamingEnabled').checked = autoGroupNamingEnabled;
+    document.getElementById('autoGroupNamingDelayMinutes').value = autoGroupNamingDelayMinutes;
+    syncAutoNamingDelayState();
 
     const bookmarkEnabled = settings.bookmarkEnabled !== undefined
       ? settings.bookmarkEnabled
@@ -146,6 +173,19 @@ async function saveSettings(event) {
   }
 
   const showGroupAge = document.getElementById('showGroupAge').checked;
+  const autoGroupNamingEnabled = document.getElementById('autoGroupNamingEnabled').checked;
+  let autoGroupNamingDelayMinutes = Number.parseInt(
+    document.getElementById('autoGroupNamingDelayMinutes').value,
+    10
+  );
+
+  if (!Number.isInteger(autoGroupNamingDelayMinutes) || autoGroupNamingDelayMinutes <= 0) {
+    if (autoGroupNamingEnabled) {
+      showError('autoGroupNamingDelayMinutes', 'Must be a positive whole number');
+      return;
+    }
+    autoGroupNamingDelayMinutes = DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES;
+  }
 
   const bookmarkEnabled = document.getElementById('bookmarkEnabled').checked;
   const bookmarkFolderName = document.getElementById('bookmarkFolderName').value.trim();
@@ -169,6 +209,8 @@ async function saveSettings(event) {
     timeMode,
     thresholds: { greenToYellow, yellowToRed, redToGone },
     showGroupAge,
+    autoGroupNamingEnabled,
+    autoGroupNamingDelayMinutes,
     bookmarkEnabled,
     bookmarkFolderName,
   };
@@ -186,3 +228,4 @@ async function saveSettings(event) {
 
 document.addEventListener('DOMContentLoaded', loadSettings);
 document.getElementById('settings-form').addEventListener('submit', saveSettings);
+document.getElementById('autoGroupNamingEnabled').addEventListener('change', syncAutoNamingDelayState);

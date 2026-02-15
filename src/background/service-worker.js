@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_AUTO_GROUP_NAMING, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
 import { createTabEntry, handleNavigation, reconcileTabs } from './tab-tracker.js';
@@ -12,6 +12,10 @@ import {
   updateGroupColor,
   sortTabsAndGroups,
   dissolveUnnamedSingleTabGroups,
+  autoNameEligibleGroups,
+  applyUserEditLock,
+  consumeExpectedExtensionTitleUpdate,
+  consumeExpectedExtensionColorUpdate,
   updateGroupTitlesWithAge,
   removeAgeSuffixFromAllGroups,
 } from './group-manager.js';
@@ -27,6 +31,7 @@ import {
 } from './time-accumulator.js';
 
 const logger = createLogger('background');
+const USER_EDIT_LOCK_MS = 15_000;
 
 // Guard: suppress reactive event handlers while the evaluation cycle owns state
 let evaluationCycleRunning = false;
@@ -35,6 +40,7 @@ const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
 // Guard: suppress onUpdated groupId handler while placeNewTab is running
 let tabPlacementRunning = false;
+const navigationMutationTabs = new Set(); // tabIds being mutated by navigation reset flow
 
 // ─── Debounced Sort & Title Update ───────────────────────────────────────────
 // Called from reactive event handlers (tab move, group change, etc.) to keep
@@ -43,6 +49,17 @@ let tabPlacementRunning = false;
 const SORT_DEBOUNCE_MS = 300;
 const _sortTimers = new Map(); // windowId → timeoutId
 let sortUpdateRunning = false; // suppress reactive handlers during sort
+
+function resolveAutoGroupNamingSettings(settings) {
+  const enabled = typeof settings?.autoGroupNamingEnabled === 'boolean'
+    ? settings.autoGroupNamingEnabled
+    : DEFAULT_AUTO_GROUP_NAMING.ENABLED;
+  const delayMinutes = Number.isInteger(settings?.autoGroupNamingDelayMinutes)
+    && settings.autoGroupNamingDelayMinutes > 0
+    ? settings.autoGroupNamingDelayMinutes
+    : DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES;
+  return { enabled, delayMinutes };
+}
 
 function _scheduleSortAndUpdate(windowId) {
   if (evaluationCycleRunning || sortUpdateRunning) return;
@@ -83,8 +100,11 @@ async function _runSortAndUpdate(windowId) {
     await dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowState);
     await sortTabsAndGroups(windowId, tabMeta, windowState);
 
+    const autoNaming = resolveAutoGroupNamingSettings(settings);
+    await autoNameEligibleGroups(windowId, tabMeta, windowState, autoNaming);
+
     // Update group titles with age if enabled
-    const showGroupAge = settings.showGroupAge !== undefined
+    const showGroupAge = typeof settings.showGroupAge === 'boolean'
       ? settings.showGroupAge
       : DEFAULT_SHOW_GROUP_AGE;
     if (showGroupAge) {
@@ -123,6 +143,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
         },
         bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
         bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
+        autoGroupNamingEnabled: DEFAULT_AUTO_GROUP_NAMING.ENABLED,
+        autoGroupNamingDelayMinutes: DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES,
       };
 
       await batchWrite({
@@ -274,7 +296,7 @@ async function _runEvaluationCycleInner(cid) {
   }
 
   // ── Build goneConfig for sortTabsAndGroups ─────────────────────────
-  const bookmarkEnabled = settings.bookmarkEnabled !== undefined
+  const bookmarkEnabled = typeof settings.bookmarkEnabled === 'boolean'
     ? settings.bookmarkEnabled
     : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
   let bookmarkFolderId = null;
@@ -296,6 +318,7 @@ async function _runEvaluationCycleInner(cid) {
 
   // ── Per-window: dissolve, sort (incl. gone handling), update titles ─
   const allWindows = new Set(Object.values(tabMeta).map((m) => m.windowId));
+  const autoNaming = resolveAutoGroupNamingSettings(settings);
 
   for (const wid of allWindows) {
     // Dissolve unnamed single-tab groups
@@ -306,8 +329,10 @@ async function _runEvaluationCycleInner(cid) {
     // groups into zone order
     await sortTabsAndGroups(wid, tabMeta, windowState, goneConfig);
 
+    await autoNameEligibleGroups(wid, tabMeta, windowState, autoNaming);
+
     // Update group titles with age if enabled
-    const showGroupAge = settings.showGroupAge !== undefined
+    const showGroupAge = typeof settings.showGroupAge === 'boolean'
       ? settings.showGroupAge
       : DEFAULT_SHOW_GROUP_AGE;
     logger.debug('showGroupAge resolved', { showGroupAge, settingsValue: settings.showGroupAge, default: DEFAULT_SHOW_GROUP_AGE });
@@ -420,7 +445,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   // T041: Handle user manually moving tab to a different group
   // Skip if the evaluation cycle is running — it owns state and will persist it.
-  if (changeInfo.groupId !== undefined && !evaluationCycleRunning && !tabPlacementRunning && !sortUpdateRunning) {
+  if (changeInfo.groupId !== undefined
+      && !evaluationCycleRunning
+      && !tabPlacementRunning
+      && !sortUpdateRunning
+      && !navigationMutationTabs.has(tabId)) {
     try {
       const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
@@ -511,6 +540,7 @@ async function _handleNavigationEvent(tabId, source) {
   _lastNavHandled.set(tabId, now);
 
   const cid = logger.correlationId();
+  navigationMutationTabs.add(tabId);
   try {
     if (_consumeDiscardRestoreMarker(tabId, now)) {
       logger.debug('Ignoring navigation immediately after discarded-tab restore', { tabId, source }, cid);
@@ -603,6 +633,8 @@ async function _handleNavigationEvent(tabId, source) {
     logger.debug('Navigation handled, refresh time reset', { tabId, source }, cid);
   } catch (err) {
     logger.error('Navigation handler failed', { tabId, source, error: err.message }, cid);
+  } finally {
+    navigationMutationTabs.delete(tabId);
   }
 }
 
@@ -701,8 +733,8 @@ chrome.tabGroups.onRemoved.addListener(async (group) => {
     const state = await readState([STORAGE_KEYS.WINDOW_STATE]);
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
     const ws = windowState[group.windowId] || windowState[String(group.windowId)];
+    let changed = false;
     if (ws && ws.specialGroups) {
-      let changed = false;
       if (ws.specialGroups.yellow === group.id) {
         ws.specialGroups.yellow = null;
         changed = true;
@@ -711,10 +743,20 @@ chrome.tabGroups.onRemoved.addListener(async (group) => {
         ws.specialGroups.red = null;
         changed = true;
       }
-      if (changed) {
-        await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
-        logger.info('Special group removed externally', { groupId: group.id, windowId: group.windowId }, cid);
-      }
+    }
+    if (ws && ws.groupZones) {
+      delete ws.groupZones[group.id];
+      delete ws.groupZones[String(group.id)];
+      changed = true;
+    }
+    if (ws && ws.groupNaming) {
+      delete ws.groupNaming[group.id];
+      delete ws.groupNaming[String(group.id)];
+      changed = true;
+    }
+    if (changed) {
+      await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+      logger.info('Group removed externally, cleaned metadata', { groupId: group.id, windowId: group.windowId }, cid);
     }
     logger.debug('Tab group removed', { groupId: group.id, windowId: group.windowId }, cid);
     _scheduleSortAndUpdate(group.windowId);
@@ -734,8 +776,31 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
       logger.debug('Special group updated, will re-apply on next cycle', { groupId: group.id }, cid);
       return;
     }
-    // For user groups: we never overwrite the user's title (FR-023)
-    // Color will be re-applied to match status on next evaluation cycle
+
+    const extensionTitleWrite = typeof group.title === 'string'
+      && consumeExpectedExtensionTitleUpdate(group.id, group.title);
+    const extensionColorWrite = typeof group.color === 'string'
+      && consumeExpectedExtensionColorUpdate(group.id, group.color);
+    if (extensionTitleWrite || extensionColorWrite) {
+      logger.debug('Tab group update acknowledged as extension write', {
+        groupId: group.id,
+        windowId: group.windowId,
+        extensionTitleWrite,
+        extensionColorWrite,
+      }, cid);
+      return;
+    }
+
+    if (group.title !== undefined) {
+      const lockResult = applyUserEditLock(group.windowId, group, windowState, USER_EDIT_LOCK_MS);
+      await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+      logger.debug('Recorded user group title edit lock', {
+        groupId: group.id,
+        windowId: group.windowId,
+        lockResult,
+      }, cid);
+    }
+
     logger.debug('Tab group updated by user', { groupId: group.id, title: group.title, color: group.color }, cid);
     _scheduleSortAndUpdate(group.windowId);
   } catch (err) {
@@ -805,14 +870,21 @@ async function reconcileState(cid) {
     const chromeTabIds = new Set(chromeTabs.map((t) => t.id));
     const chromeWindowIds = new Set(chromeWindows.map((w) => w.id));
     const reconciledMeta = {};
+    const liveGroupIdsByWindow = new Map();
 
     for (const tab of chromeTabs) {
       if (tab.pinned) continue;
       const tabIdStr = String(tab.id);
+      const liveGroupId = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? tab.groupId : null;
+      if (liveGroupId !== null) {
+        const bucket = liveGroupIdsByWindow.get(tab.windowId) || new Set();
+        bucket.add(liveGroupId);
+        liveGroupIdsByWindow.set(tab.windowId, bucket);
+      }
       if (storedTabMeta[tabIdStr] || storedTabMeta[tab.id]) {
         const existing = storedTabMeta[tabIdStr] || storedTabMeta[tab.id];
         existing.windowId = tab.windowId;
-        existing.groupId = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? tab.groupId : null;
+        existing.groupId = liveGroupId;
         existing.pinned = tab.pinned;
         reconciledMeta[tab.id] = existing;
       } else {
@@ -822,7 +894,7 @@ async function reconcileState(cid) {
           refreshActiveTime: currentActiveTime,
           refreshWallTime: now,
           status: STATUS.GREEN,
-          groupId: tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? tab.groupId : null,
+          groupId: liveGroupId,
           isSpecialGroup: false,
           pinned: false,
         };
@@ -833,7 +905,48 @@ async function reconcileState(cid) {
     // Keep existing window state for windows still open
     for (const [wid, ws] of Object.entries(storedWindowState)) {
       if (chromeWindowIds.has(Number(wid))) {
-        reconciledWindowState[wid] = ws;
+        const liveGroupIds = liveGroupIdsByWindow.get(Number(wid)) || new Set();
+        const currentState = ws && typeof ws === 'object' ? ws : {};
+        const specialGroups = currentState.specialGroups && typeof currentState.specialGroups === 'object'
+          ? currentState.specialGroups
+          : { yellow: null, red: null };
+        const groupZones = currentState.groupZones && typeof currentState.groupZones === 'object'
+          ? currentState.groupZones
+          : {};
+        const groupNamingSource = currentState.groupNaming && typeof currentState.groupNaming === 'object'
+          ? currentState.groupNaming
+          : {};
+
+        const groupNaming = {};
+        for (const [groupId, metadata] of Object.entries(groupNamingSource)) {
+          if (liveGroupIds.has(Number(groupId))) {
+            const now = Date.now();
+            const firstUnnamedSeenAt = Number.isFinite(metadata?.firstUnnamedSeenAt) && metadata.firstUnnamedSeenAt > 0
+              ? metadata.firstUnnamedSeenAt
+              : now;
+            const lastAutoNamedAt = Number.isFinite(metadata?.lastAutoNamedAt) && metadata.lastAutoNamedAt > 0
+              ? metadata.lastAutoNamedAt
+              : null;
+            const lastCandidate = typeof metadata?.lastCandidate === 'string' && metadata.lastCandidate.trim()
+              ? metadata.lastCandidate.trim().split(/\s+/).slice(0, 2).join(' ')
+              : null;
+            const userEditLockUntil = Number.isFinite(metadata?.userEditLockUntil) && metadata.userEditLockUntil > 0
+              ? metadata.userEditLockUntil
+              : now;
+            groupNaming[groupId] = {
+              firstUnnamedSeenAt,
+              lastAutoNamedAt,
+              lastCandidate,
+              userEditLockUntil,
+            };
+          }
+        }
+
+        reconciledWindowState[wid] = {
+          specialGroups,
+          groupZones,
+          groupNaming,
+        };
       }
     }
     // Create default state for windows that have tabs but no stored state
@@ -842,6 +955,7 @@ async function reconcileState(cid) {
         reconciledWindowState[wid] = {
           specialGroups: { yellow: null, red: null },
           groupZones: {},
+          groupNaming: {},
         };
       }
     }

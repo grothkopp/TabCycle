@@ -55,6 +55,44 @@ describe('storage-persistence integration', () => {
     expect(result[STORAGE_KEYS.SETTINGS]).toEqual(settings);
   });
 
+  it('should persist auto group naming settings toggle and delay', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: {
+        greenToYellow: 14400000,
+        yellowToRed: 28800000,
+        redToGone: 86400000,
+      },
+      autoGroupNamingEnabled: false,
+      autoGroupNamingDelayMinutes: 9,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingDelayMinutes).toBe(9);
+  });
+
+  it('should still read settings object when auto naming values are invalid', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: {
+        greenToYellow: 14400000,
+        yellowToRed: 28800000,
+        redToGone: 86400000,
+      },
+      autoGroupNamingEnabled: 'yes',
+      autoGroupNamingDelayMinutes: 0,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingEnabled).toBe('yes');
+    expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingDelayMinutes).toBe(0);
+  });
+
   it('should write and read back active time state', async () => {
     const activeTime = {
       accumulatedMs: 12345,
@@ -120,5 +158,59 @@ describe('storage-persistence integration', () => {
     await writeState({ [STORAGE_KEYS.SCHEMA_VERSION]: 2 });
     const result = await readState([STORAGE_KEYS.SCHEMA_VERSION]);
     expect(result[STORAGE_KEYS.SCHEMA_VERSION]).toBe(2);
+  });
+
+  it('should write and read windowState groupNaming metadata', async () => {
+    const now = Date.now();
+    const windowState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: { 12: 'green' },
+        groupNaming: {
+          12: {
+            firstUnnamedSeenAt: now,
+            lastAutoNamedAt: null,
+            lastCandidate: 'Dev Tools',
+            userEditLockUntil: now + 1000,
+          },
+        },
+      },
+    };
+
+    await writeState({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+    const result = await readState([STORAGE_KEYS.WINDOW_STATE]);
+    expect(result[STORAGE_KEYS.WINDOW_STATE]).toEqual(windowState);
+  });
+
+  it('should allow cleanup of stale groupNaming entries by overwriting windowState', async () => {
+    const now = Date.now();
+    await writeState({
+      [STORAGE_KEYS.WINDOW_STATE]: {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            12: {
+              firstUnnamedSeenAt: now,
+              lastAutoNamedAt: null,
+              lastCandidate: 'Old Entry',
+              userEditLockUntil: now + 1000,
+            },
+          },
+        },
+      },
+    });
+
+    const cleanedState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {},
+      },
+    };
+    await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: cleanedState });
+
+    const result = await readState([STORAGE_KEYS.WINDOW_STATE]);
+    expect(result[STORAGE_KEYS.WINDOW_STATE]).toEqual(cleanedState);
   });
 });

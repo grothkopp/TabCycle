@@ -28,6 +28,11 @@ export const DEFAULT_BOOKMARK_SETTINGS = Object.freeze({
   BOOKMARK_FOLDER_NAME: 'Closed Tabs',
 });
 
+export const DEFAULT_AUTO_GROUP_NAMING = Object.freeze({
+  ENABLED: true,
+  DELAY_MINUTES: 5,
+});
+
 export const DEFAULT_SHOW_GROUP_AGE = false;
 
 export const BOOKMARK_BLOCKED_URLS = Object.freeze([
