@@ -55,6 +55,7 @@ const {
   isSpecialGroup,
   moveTabToSpecialGroup,
   dissolveUnnamedSingleTabGroups,
+  updateGroupColor,
   parseGroupTitle,
   composeGroupTitle,
   isBaseGroupNameEmpty,
@@ -62,6 +63,7 @@ const {
   autoNameEligibleGroups,
   applyUserEditLock,
   consumeExpectedExtensionTitleUpdate,
+  consumeExpectedExtensionColorUpdate,
   trackExtensionGroup,
   untrackExtensionGroup,
 } = await import('../../src/background/group-manager.js');
@@ -623,6 +625,16 @@ describe('group-manager', () => {
       expect(group).toBeDefined();
       expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(true);
       expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(false);
+    });
+  });
+
+  describe('extension update filtering', () => {
+    it('should mark extension color updates for onUpdated filtering', async () => {
+      mockGroups.push({ id: 61, windowId: 1, title: '', color: 'grey' });
+      await updateGroupColor(61, 'yellow');
+
+      expect(consumeExpectedExtensionColorUpdate(61, 'yellow')).toBe(true);
+      expect(consumeExpectedExtensionColorUpdate(61, 'yellow')).toBe(false);
     });
   });
 

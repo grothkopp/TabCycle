@@ -15,6 +15,7 @@ import {
   autoNameEligibleGroups,
   applyUserEditLock,
   consumeExpectedExtensionTitleUpdate,
+  consumeExpectedExtensionColorUpdate,
   updateGroupTitlesWithAge,
   removeAgeSuffixFromAllGroups,
 } from './group-manager.js';
@@ -768,10 +769,16 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
       return;
     }
 
-    if (typeof group.title === 'string' && consumeExpectedExtensionTitleUpdate(group.id, group.title)) {
-      logger.debug('Tab group title update acknowledged as extension write', {
+    const extensionTitleWrite = typeof group.title === 'string'
+      && consumeExpectedExtensionTitleUpdate(group.id, group.title);
+    const extensionColorWrite = typeof group.color === 'string'
+      && consumeExpectedExtensionColorUpdate(group.id, group.color);
+    if (extensionTitleWrite || extensionColorWrite) {
+      logger.debug('Tab group update acknowledged as extension write', {
         groupId: group.id,
         windowId: group.windowId,
+        extensionTitleWrite,
+        extensionColorWrite,
       }, cid);
       return;
     }

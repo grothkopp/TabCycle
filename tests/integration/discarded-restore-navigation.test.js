@@ -113,6 +113,7 @@ async function loadServiceWorker() {
     autoNameEligibleGroups: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
     applyUserEditLock: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
     consumeExpectedExtensionTitleUpdate: jest.fn(() => false),
+    consumeExpectedExtensionColorUpdate: jest.fn(() => false),
     stripAgeSuffix: jest.fn((title) => title),
     formatAge: jest.fn(() => ''),
     computeGroupAge: jest.fn(() => 0),

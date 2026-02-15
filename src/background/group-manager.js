@@ -8,6 +8,7 @@ const logger = createLogger('background');
 const AUTO_NAME_DEFAULT_DELAY_MINUTES = 5;
 const EXTENSION_TITLE_UPDATE_TTL_MS = 10_000;
 const extensionTitleUpdates = new Map(); // groupId -> { title, expiresAt }
+const extensionColorUpdates = new Map(); // groupId -> { color, expiresAt }
 
 // Track groups created by our extension (eligible for auto-dissolution)
 const extensionCreatedGroups = new Set();
@@ -175,12 +176,37 @@ function markExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
   });
 }
 
+function pruneExtensionColorUpdates(nowMs = Date.now()) {
+  for (const [groupId, entry] of extensionColorUpdates.entries()) {
+    if (entry.expiresAt <= nowMs) {
+      extensionColorUpdates.delete(groupId);
+    }
+  }
+}
+
+function markExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
+  pruneExtensionColorUpdates(nowMs);
+  extensionColorUpdates.set(groupId, {
+    color,
+    expiresAt: nowMs + EXTENSION_TITLE_UPDATE_TTL_MS,
+  });
+}
+
 export function consumeExpectedExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
   pruneExtensionTitleUpdates(nowMs);
   const entry = extensionTitleUpdates.get(groupId);
   if (!entry) return false;
   if (typeof title === 'string' && entry.title !== title) return false;
   extensionTitleUpdates.delete(groupId);
+  return true;
+}
+
+export function consumeExpectedExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
+  pruneExtensionColorUpdates(nowMs);
+  const entry = extensionColorUpdates.get(groupId);
+  if (!entry) return false;
+  if (typeof color === 'string' && entry.color !== color) return false;
+  extensionColorUpdates.delete(groupId);
   return true;
 }
 
@@ -325,6 +351,7 @@ export function computeGroupStatus(groupId, tabMeta) {
 
 export async function updateGroupColor(groupId, status) {
   try {
+    markExtensionColorUpdate(groupId, status);
     const result = await chrome.tabGroups.update(groupId, { color: status });
     logger.debug('Updated group color', { groupId, status, resultColor: result?.color });
   } catch (err) {
