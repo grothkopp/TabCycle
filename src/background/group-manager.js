@@ -445,8 +445,24 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
     }
 
     // ── 3. Sort groups ─────────────────────────────────────────────────
-    // Re-read groups after tab moves may have created/emptied groups
-    const groupsAfter = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    // Re-read tabs/groups after tab moves may have created/emptied groups.
+    // tabGroups.query is creation-ordered, so we need tab indices to recover
+    // visual group order.
+    const [tabsAfter, groupsAfter] = await Promise.all([
+      chrome.tabs.query({ windowId: Number(windowId) }),
+      chrome.tabGroups.query({ windowId: Number(windowId) }),
+    ]);
+
+    const groupMinIndex = new Map();
+    for (let i = 0; i < tabsAfter.length; i++) {
+      const ct = tabsAfter[i];
+      if (ct.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
+      const tabIndex = Number.isFinite(ct.index) ? ct.index : i;
+      const prev = groupMinIndex.get(ct.groupId);
+      if (prev === undefined || tabIndex < prev) {
+        groupMinIndex.set(ct.groupId, tabIndex);
+      }
+    }
 
     // Refresh special group set from windowState references only.
     // We intentionally do NOT re-discover by title/color — a user group
@@ -458,10 +474,16 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       }
     }
 
-    const userGroups = [];
-    for (const g of groupsAfter) {
-      if (!specialAfter.has(g.id)) userGroups.push(g);
-    }
+    const userGroups = groupsAfter
+      .filter((g) => !specialAfter.has(g.id))
+      .sort((a, b) => {
+        const ai = groupMinIndex.get(a.id);
+        const bi = groupMinIndex.get(b.id);
+        if (ai === undefined && bi === undefined) return a.id - b.id;
+        if (ai === undefined) return 1;
+        if (bi === undefined) return -1;
+        return ai - bi;
+      });
 
     // Snapshot previous zones BEFORE overwriting
     const prevZones = { ...ws.groupZones };
@@ -592,19 +614,17 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
     }
 
     // Compare current visual order to desired order.
-    // chrome.tabGroups.query returns groups in creation order, NOT visual
-    // order, so we must sort by the minimum tab index of each group's tabs.
-    const groupMinIndex = new Map();
-    for (const ct of chromeTabs) {
-      if (ct.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
-      const prev = groupMinIndex.get(ct.groupId);
-      if (prev === undefined || ct.index < prev) {
-        groupMinIndex.set(ct.groupId, ct.index);
-      }
-    }
+    // tabGroups.query returns creation order, so we sort by min tab index.
     const allOrdered = groupsAfter
       .filter((g) => statusMap.has(g.id) || specialAfter.has(g.id))
-      .sort((a, b) => (groupMinIndex.get(a.id) ?? 0) - (groupMinIndex.get(b.id) ?? 0));
+      .sort((a, b) => {
+        const ai = groupMinIndex.get(a.id);
+        const bi = groupMinIndex.get(b.id);
+        if (ai === undefined && bi === undefined) return a.id - b.id;
+        if (ai === undefined) return 1;
+        if (bi === undefined) return -1;
+        return ai - bi;
+      });
     const currentIds = allOrdered.map((g) => g.id);
     const desiredIds = desired.map((g) => g.id);
 
