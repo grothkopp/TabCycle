@@ -237,3 +237,10 @@ The harness (`tests/e2e-chrome/harness.js`) launches Puppeteer's bundled
 - **Spec numbering**: Before choosing a new feature/spec number, inspect
   existing `specs/[0-9]+-*` directories first and use the next available
   numeric prefix.
+
+## Active Technologies
+- JavaScript (ES2022+), Manifest V3 service worker, no transpiler + Chrome Extension APIs (`chrome.tabs`, `chrome.tabGroups`, `chrome.storage`, `chrome.alarms`, `chrome.webNavigation`) and existing internal modules (`group-manager.js`, `service-worker.js`, `schemas.js`, options UI) (003-auto-group-names)
+- `chrome.storage.local` — extend `v1_settings` with auto-naming fields; extend per-window runtime state with group naming metadata (session-scoped group IDs) (003-auto-group-names)
+
+## Recent Changes
+- 003-auto-group-names: Added JavaScript (ES2022+), Manifest V3 service worker, no transpiler + Chrome Extension APIs (`chrome.tabs`, `chrome.tabGroups`, `chrome.storage`, `chrome.alarms`, `chrome.webNavigation`) and existing internal modules (`group-manager.js`, `service-worker.js`, `schemas.js`, options UI)
