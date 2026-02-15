@@ -1,47 +1,126 @@
-# Contract: Group Title Update Coordination
+# Group Title Update Contract: Auto-Name Unnamed Groups
 
-## Title model
+**Branch**: `003-auto-group-names` | **Version**: v1
 
-All user-group titles are treated as:
+## Overview
 
-- `baseName`: semantic group name
-- `ageSuffix`: optional `(<number><m|h|d>)`
+This contract defines deterministic rules for composing group titles when two extension features may update title text:
+- auto-naming unnamed groups,
+- age-suffix display (`showGroupAge`).
 
-Parsing and composition are defined by:
+It also defines how user edits take precedence.
 
-- `parseGroupTitle(title)`
-- `composeGroupTitle(baseName, ageSuffix)`
+---
 
-Age-only titles like `(5m)` are considered empty `baseName` values.
+## Canonical Title Model
 
-## Update precedence
+Every group title is treated as:
 
-1. User-provided non-empty `baseName` is immutable to auto-naming.
-2. Auto-naming may write `baseName` only when `baseName` is empty and delay/lock gates pass.
-3. Group-age updates may only rewrite `ageSuffix`; they must preserve `baseName`.
+`displayTitle = compose(baseName, ageSuffix)`
 
-## Auto-naming gate contract
+Where:
+- `baseName`: semantic name (user-entered or auto-generated).
+- `ageSuffix`: extension-managed metadata (for example `(23m)`), optional.
 
-Auto-naming is attempted only when all conditions hold:
+### Parsing Rule
 
-- `autoGroupNamingEnabled === true`
-- group is not a special group
-- parsed `baseName` is empty
-- unnamed duration `>= autoGroupNamingDelayMinutes`
-- `Date.now() >= userEditLockUntil`
-- pre-write revalidation still sees empty `baseName`
+- Use existing age-suffix parsing (`stripAgeSuffix` semantics) to extract `baseName`.
+- If display title contains only age suffix text, `baseName` is considered empty.
 
-## User-edit lock contract
+---
 
-`chrome.tabGroups.onUpdated` title updates for non-special groups create/update
-`userEditLockUntil` for a short lock window.
+## Update Precedence Rules
 
-This prevents auto-naming from colliding with active user edits near threshold time.
+1. **User edits win**
+   - If user is actively editing group title, auto-naming must skip/abort.
+2. **Auto-naming writes base name only**
+   - Auto-naming cannot directly overwrite age suffix.
+3. **Age updater writes suffix only**
+   - Age updater preserves current base name.
+4. **Deterministic merge**
+   - Final title is always recomposed from current `baseName` + current `ageSuffix`.
 
-## Extension-write collision contract
+---
 
-Extension-initiated title writes are tracked briefly and consumed by the
-`tabGroups.onUpdated` handler so they are not mistaken for user edits.
+## API Contract: `chrome.tabGroups.onUpdated`
 
-This prevents extension features (auto-naming and age suffix updates) from
-locking or overwriting each other.
+**Used by**: `service-worker.js`  
+**Purpose**: detect user title edits and set lock windows that block auto-naming.
+
+Input of interest:
+- `group.id`
+- `group.windowId`
+- `group.title`
+
+Required behavior:
+- For non-special groups, update runtime lock metadata so active user editing blocks auto-name attempts.
+
+---
+
+## API Contract: `chrome.tabGroups.query({ windowId })`
+
+**Used by**: `group-manager.js`  
+**Purpose**: obtain live group titles for parsing/composition and naming eligibility checks.
+
+Required behavior:
+- Parse each group's display title into base/suffix components before any write decision.
+
+---
+
+## API Contract: `chrome.tabGroups.update(groupId, { title })`
+
+**Used by**: `group-manager.js`  
+**Purpose**: apply either base-name auto-naming update or age-suffix recomposition.
+
+Required safety checks before write:
+- group still exists,
+- user-edit lock is not active,
+- base name remains eligible (still empty for auto-naming path),
+- composed title differs from current title.
+
+---
+
+## Auto-Name Generation Contract
+
+### Inputs
+
+- Live tabs in target group (`title`, `url`),
+- current display title parsed into base/suffix,
+- settings (`autoGroupNamingEnabled`, `autoGroupNamingDelayMinutes`),
+- runtime lock metadata.
+
+### Output
+
+- `generatedBaseName`: string with 1-2 words,
+- or skip decision with reason (`disabled`, `not-eligible`, `user-edit-lock`, `insufficient-signal`).
+
+### Constraints
+
+- Output must be max 2 words.
+- Generic fallback must be deterministic.
+- Age suffix is excluded from naming candidate extraction.
+
+---
+
+## Race/Conflict Handling Contract
+
+When auto-naming and age update are both possible in one cycle:
+
+1. parse current title,
+2. compute/choose base name if eligible,
+3. compute suffix (if age display enabled),
+4. compose once,
+5. single `chrome.tabGroups.update` write per group for final merged title.
+
+If user edit occurs between read and write:
+- abort write and retain user-provided title.
+
+---
+
+## Observability Contract
+
+Each naming decision should emit structured logs with:
+- `groupId`,
+- decision (`named`, `skipped`, `aborted`),
+- reason code (for skips/aborts),
+- candidate metadata (length/score class, not full URL content).

@@ -1,43 +1,60 @@
-# Storage Contract: Auto-Name Unnamed Groups
+# Storage Contracts: Auto-Name Unnamed Groups
 
-## Settings (`v1_settings`)
+**Branch**: `003-auto-group-names` | **Version**: v1 (additive extension)
 
-### New fields
+## Overview
 
-- `autoGroupNamingEnabled: boolean`
-- `autoGroupNamingDelayMinutes: integer (>0)`
+This feature extends existing `v1` storage contracts with auto-group-naming settings and runtime group-naming metadata. Existing contracts remain valid.
 
-### Default values (install-time)
+---
 
-- `autoGroupNamingEnabled = true`
-- `autoGroupNamingDelayMinutes = 5`
+## Contract: `v1_settings` (Extended)
 
-### Runtime fallback contract
-
-If stored values are missing or invalid:
-
-- `autoGroupNamingEnabled` falls back to `true`
-- `autoGroupNamingDelayMinutes` falls back to `5`
-
-No migration to a new storage schema version is required.
-
-## Window state (`v1_windowState`)
-
-### `windowState[windowId].groupNaming`
-
-`groupNaming` is a per-window map keyed by `groupId`:
+**Purpose**: Persist user controls for auto-naming behavior.
 
 ```json
 {
-  "<groupId>": {
-    "firstUnnamedSeenAt": 1739577600000,
-    "lastAutoNamedAt": 1739577900000,
-    "lastCandidate": "React Docs",
-    "userEditLockUntil": 1739577915000
+  "autoGroupNamingEnabled": true,
+  "autoGroupNamingDelayMinutes": 5
+}
+```
+
+| Field | Type | Default | Constraints |
+|-------|------|---------|-------------|
+| `autoGroupNamingEnabled` | `boolean` | `true` | Must be boolean |
+| `autoGroupNamingDelayMinutes` | `number` | `5` | Positive whole number |
+
+**Read by**: `service-worker.js`, `options.js`  
+**Written by**: `options.js`  
+**Change event**: `chrome.storage.onChanged` for `v1_settings` triggers immediate re-evaluation cycle.
+
+**Backward compatibility**:
+- Missing fields are interpreted as defaults (`true`, `5`).
+
+---
+
+## Contract: `v1_windowState` (Extended)
+
+**Purpose**: Persist per-window runtime metadata needed to evaluate unnamed-group age and user-edit lock windows.
+
+```json
+{
+  "1": {
+    "specialGroups": { "yellow": 456, "red": null },
+    "groupZones": { "789": "green" },
+    "groupNaming": {
+      "789": {
+        "firstUnnamedSeenAt": 1708135200000,
+        "lastAutoNamedAt": null,
+        "lastCandidate": null,
+        "userEditLockUntil": 1708135500000
+      }
+    }
   }
 }
 ```
 
+<<<<<<< HEAD
 ### Field semantics
 
 - `firstUnnamedSeenAt`: first observed time that the group had an empty base title.
@@ -52,3 +69,66 @@ No migration to a new storage schema version is required.
   - the group no longer exists in the window,
   - or the group has a non-empty base title.
 - Reconciliation keeps only live groups and normalizes malformed metadata.
+=======
+| Field | Type | Constraints |
+|-------|------|-------------|
+| `groupNaming` | `object` | Optional map keyed by group ID string |
+| `firstUnnamedSeenAt` | `number` | Positive timestamp |
+| `lastAutoNamedAt` | `number \| null` | Positive timestamp or null |
+| `lastCandidate` | `string \| null` | Null or 1-2 word candidate |
+| `userEditLockUntil` | `number` | Positive timestamp |
+
+**Read by**: `service-worker.js`, `group-manager.js` (during evaluation/sort/title update pass)  
+**Written by**: `service-worker.js` / `group-manager.js` during cycle and group update events  
+**Cleanup**: entries removed for non-existent groups during reconciliation.
+
+---
+
+## Event Flow Contracts
+
+### Settings Save Flow
+
+```text
+Options Page                    chrome.storage              Service Worker
+     |                               |                           |
+     |-- writes v1_settings -------->|                           |
+     |   (autoGroupNamingEnabled,    |                           |
+     |    autoGroupNamingDelayMinutes)|                          |
+     |                               |-- onChanged event ------->|
+     |                               |                           |-- runEvaluationCycle()
+```
+
+### Evaluation + Naming Flow
+
+```text
+chrome.alarms                   Service Worker              group-manager
+     |                               |                           |
+     |-- onAlarm "tabcycle-eval" --->|                           |
+     |                               |-- read v1_settings        |
+     |                               |-- read v1_windowState     |
+     |                               |-- sortTabsAndGroups() --->|
+     |                               |-- updateGroupTitlesWithAge |
+     |                               |-- auto-name pass --------->|
+     |                               |   (base name only)         |
+     |                               |-- write v1_windowState --->|
+```
+
+### User Group-Title Edit Flow
+
+```text
+chrome.tabGroups                Service Worker              chrome.storage
+     |                               |                           |
+     |-- onUpdated(group.title) ---->|                           |
+     |                               |-- set userEditLockUntil   |
+     |                               |   for groupNaming[groupId]|
+     |                               |-- write v1_windowState --->|
+```
+
+---
+
+## Migration Strategy
+
+No migration required. This is additive:
+- Existing installations continue working with fallback defaults.
+- New runtime `groupNaming` map is created lazily when groups become eligible for tracking.
+>>>>>>> 003-auto-group-names
