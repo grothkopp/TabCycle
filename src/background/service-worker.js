@@ -40,6 +40,7 @@ const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
 // Guard: suppress onUpdated groupId handler while placeNewTab is running
 let tabPlacementRunning = false;
+const navigationMutationTabs = new Set(); // tabIds being mutated by navigation reset flow
 
 // ─── Debounced Sort & Title Update ───────────────────────────────────────────
 // Called from reactive event handlers (tab move, group change, etc.) to keep
@@ -444,7 +445,11 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   // T041: Handle user manually moving tab to a different group
   // Skip if the evaluation cycle is running — it owns state and will persist it.
-  if (changeInfo.groupId !== undefined && !evaluationCycleRunning && !tabPlacementRunning && !sortUpdateRunning) {
+  if (changeInfo.groupId !== undefined
+      && !evaluationCycleRunning
+      && !tabPlacementRunning
+      && !sortUpdateRunning
+      && !navigationMutationTabs.has(tabId)) {
     try {
       const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
@@ -535,6 +540,7 @@ async function _handleNavigationEvent(tabId, source) {
   _lastNavHandled.set(tabId, now);
 
   const cid = logger.correlationId();
+  navigationMutationTabs.add(tabId);
   try {
     if (_consumeDiscardRestoreMarker(tabId, now)) {
       logger.debug('Ignoring navigation immediately after discarded-tab restore', { tabId, source }, cid);
@@ -627,6 +633,8 @@ async function _handleNavigationEvent(tabId, source) {
     logger.debug('Navigation handled, refresh time reset', { tabId, source }, cid);
   } catch (err) {
     logger.error('Navigation handler failed', { tabId, source, error: err.message }, cid);
+  } finally {
+    navigationMutationTabs.delete(tabId);
   }
 }
 
