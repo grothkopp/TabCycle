@@ -234,3 +234,6 @@ The harness (`tests/e2e-chrome/harness.js`) launches Puppeteer's bundled
   releases and after core logic changes.
 - **Release checklist**: manual smoke test on a clean Chrome profile +
   policy/compliance review.
+- **Spec numbering**: Before choosing a new feature/spec number, inspect
+  existing `specs/[0-9]+-*` directories first and use the next available
+  numeric prefix.
