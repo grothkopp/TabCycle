@@ -18,7 +18,7 @@ jobs:
           - name: shard-2
             pattern: 'navigation-reset|tab-placement|gone-and-bookmarks'
           - name: shard-3
-            pattern: 'settings-persistence|group-dissolution|edge-cases|dynamic-resort'
+            pattern: 'settings-persistence|group-dissolution|edge-cases|dynamic-resort|auto-group-naming'
 
     name: E2E (${{ matrix.shard.name }})
 
