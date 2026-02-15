@@ -110,7 +110,9 @@ This document defines which Chrome extension events the service worker listens t
    - If newly unpinned: create entry in `v1_tabMeta` as fresh green tab
 2. If `changeInfo.groupId !== undefined`:
    - Update `groupId` and `isSpecialGroup` in `v1_tabMeta`
-3. Persist to storage
+3. If `changeInfo.discarded === false`:
+   - Mark the tab as recently restored from discard so the immediate restore-triggered navigation event can be ignored
+4. Persist to storage
 
 ---
 
@@ -124,7 +126,8 @@ This document defines which Chrome extension events the service worker listens t
 1. If `frameId !== 0`: ignore (only process main frame navigations)
 2. Call shared `_handleNavigationEvent(tabId, 'onCommitted')` with per-tab debounce (200ms) to avoid double-processing with `onHistoryStateUpdated`
 3. The shared handler:
-   - Skips discarded tabs
+   - Skips tabs marked as recently restored from discard (from `tabs.onUpdated` with `changeInfo.discarded === false`)
+   - Skips discarded/unloaded tabs via live tab state checks (`tab.discarded`, `tab.status === 'unloaded'`)
    - Updates tab's `refreshActiveTime` to current `accumulatedMs`
    - Updates tab's `refreshWallTime` to `Date.now()`
    - Sets tab's `status` to `"green"`

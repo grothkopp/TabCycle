@@ -377,6 +377,8 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
   if (evaluationCycleRunning || sortUpdateRunning) return;
   const cid = logger.correlationId();
   try {
+    _lastNavHandled.delete(tabId);
+    _restoredFromDiscardAt.delete(tabId);
     if (removeInfo.isWindowClosing) {
       logger.debug('Tab removed due to window closing, skipping', { tabId }, cid);
       return;
@@ -410,6 +412,11 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   const cid = logger.correlationId();
+
+  if (changeInfo.discarded === false) {
+    _restoredFromDiscardAt.set(tabId, Date.now());
+    logger.debug('Tab restored from discarded state', { tabId, windowId: tab.windowId }, cid);
+  }
 
   // T041: Handle user manually moving tab to a different group
   // Skip if the evaluation cycle is running — it owns state and will persist it.
@@ -480,6 +487,19 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
 // onHistoryStateUpdated fire for the same tab within a short window.
 const NAV_DEBOUNCE_MS = 1000;
 const _lastNavHandled = new Map();
+const RESTORE_NAV_SUPPRESSION_MS = 5000;
+const _restoredFromDiscardAt = new Map();
+
+function _consumeDiscardRestoreMarker(tabId, now) {
+  const markedAt = _restoredFromDiscardAt.get(tabId);
+  if (!markedAt) return false;
+  if (now - markedAt > RESTORE_NAV_SUPPRESSION_MS) {
+    _restoredFromDiscardAt.delete(tabId);
+    return false;
+  }
+  _restoredFromDiscardAt.delete(tabId);
+  return true;
+}
 
 async function _handleNavigationEvent(tabId, source) {
   const now = Date.now();
@@ -492,6 +512,10 @@ async function _handleNavigationEvent(tabId, source) {
 
   const cid = logger.correlationId();
   try {
+    if (_consumeDiscardRestoreMarker(tabId, now)) {
+      logger.debug('Ignoring navigation immediately after discarded-tab restore', { tabId, source }, cid);
+      return;
+    }
     // Skip navigations caused by Chrome restoring a suspended/discarded tab.
     // The tab was not actively navigated by the user — its age should not reset.
     try {
