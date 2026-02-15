@@ -561,6 +561,40 @@ describe('group-sorting', () => {
       expect(moveCalls[2]).toEqual([2, { index: -1 }]);   // staying green
     });
 
+    it('should keep visual order when multiple green groups have no prior zone entries', async () => {
+      // chrome.tabGroups.query returns creation order [1,2],
+      // but visual order from tab indices is [2,1].
+      // With no prior groupZones entries, sort must preserve visual order
+      // and avoid reordering based on creation order.
+      const groups = [
+        { id: 1, windowId: 1, title: 'Older', color: 'green' },
+        { id: 2, windowId: 1, title: 'NewerLeft', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 2, pinned: false, index: 1 },
+        { id: 20, windowId: 1, groupId: 2, pinned: false, index: 2 },
+        { id: 30, windowId: 1, groupId: 1, pinned: false, index: 6 },
+        { id: 40, windowId: 1, groupId: 1, pinned: false, index: 7 },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'green', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        40: { tabId: 40, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(result.groupsMoved).toBe(0);
+      expect(chrome.tabGroups.move).not.toHaveBeenCalled();
+    });
+
     it('should NOT move a brand-new green group when it is the only group', async () => {
       const groups = [
         { id: 1, windowId: 1, title: 'A', color: 'green' },
@@ -628,8 +662,8 @@ describe('group-sorting', () => {
         { id: 2, windowId: 1, title: 'B', color: 'yellow' },
       ];
       const tabs = [
-        { id: 10, windowId: 1, groupId: 1, pinned: false },
         { id: 20, windowId: 1, groupId: 50, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
         { id: 30, windowId: 1, groupId: 2, pinned: false },
       ];
       mockBrowserState(tabs, groups);
@@ -693,10 +727,10 @@ describe('group-sorting', () => {
         { id: 3, windowId: 1, title: 'C', color: 'red' },
       ];
       const tabs = [
-        { id: 10, windowId: 1, groupId: 1, pinned: false },
-        { id: 20, windowId: 1, groupId: 50, pinned: false },
-        { id: 30, windowId: 1, groupId: 2, pinned: false },
         { id: 40, windowId: 1, groupId: 60, pinned: false },
+        { id: 20, windowId: 1, groupId: 50, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+        { id: 30, windowId: 1, groupId: 2, pinned: false },
         { id: 50, windowId: 1, groupId: 3, pinned: false },
       ];
       mockBrowserState(tabs, groups);

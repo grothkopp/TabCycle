@@ -181,6 +181,72 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     await h.closeTab(yTab2);
   }, 30_000);
 
+  it('auto-created group from leftmost context tab stays left of existing green groups', async () => {
+    const existingA = await h.openTab('https://example.net/?tc=existing-a');
+    const existingB = await h.openTab('https://example.net/?tc=existing-b');
+    const windowId = (await h.getTab(existingA)).windowId;
+    const existingGroupId = await h.createUserGroup([existingA, existingB], 'ExistingGreen', windowId);
+    await h.backdateTab(existingA, 0);
+    await h.backdateTab(existingB, 0);
+    await h.triggerEvaluation();
+
+    const contextTabId = await h.openTab('https://example.com/?tc=leftmost-context');
+    await h.evalFn(async (id) => {
+      await chrome.tabs.move(id, { index: 1 });
+    }, contextTabId);
+    await h.backdateTab(contextTabId, 0);
+    await sleep(500);
+
+    const stateBefore = await h.getWindowState();
+    const ws = stateBefore[windowId] || stateBefore[String(windowId)] || {
+      specialGroups: { yellow: null, red: null },
+      groupZones: {},
+    };
+    await h.writeStorage({
+      v1_windowState: {
+        ...stateBefore,
+        [windowId]: {
+          ...ws,
+          groupZones: {},
+        },
+      },
+    });
+
+    const pages = await h.browser.pages();
+    const contextPage = pages.find((p) => {
+      try { return p.url().includes('leftmost-context'); } catch { return false; }
+    });
+    await contextPage.evaluate(() => { window.open('https://example.org/?tc=leftmost-opened', '_blank'); });
+    await sleep(1500);
+
+    const allTabs = await h.queryTabs({ windowId });
+    const newTab = allTabs.find((t) => t.url?.includes('leftmost-opened'));
+    expect(newTab).toBeDefined();
+
+    const contextAfter = await h.getTab(contextTabId);
+    expect(contextAfter.groupId).not.toBe(-1);
+    expect(newTab.groupId).toBe(contextAfter.groupId);
+
+    const autoTabsBeforeEval = await h.getTabsInGroup(contextAfter.groupId);
+    const existingTabsBeforeEval = await h.getTabsInGroup(existingGroupId);
+    const autoPosBeforeEval = Math.min(...autoTabsBeforeEval.map((t) => t.index));
+    const existingPosBeforeEval = Math.min(...existingTabsBeforeEval.map((t) => t.index));
+    expect(autoPosBeforeEval).toBeLessThan(existingPosBeforeEval);
+
+    await h.triggerEvaluation();
+
+    const autoTabsAfterEval = await h.getTabsInGroup(contextAfter.groupId);
+    const existingTabsAfterEval = await h.getTabsInGroup(existingGroupId);
+    const autoPosAfterEval = Math.min(...autoTabsAfterEval.map((t) => t.index));
+    const existingPosAfterEval = Math.min(...existingTabsAfterEval.map((t) => t.index));
+    expect(autoPosAfterEval).toBeLessThan(existingPosAfterEval);
+
+    await h.closeTab(newTab.id);
+    await h.closeTab(contextTabId);
+    await h.closeTab(existingA);
+    await h.closeTab(existingB);
+  }, 35_000);
+
   it('new tab from pinned context tab is green and stays green after eval', async () => {
     // Use short thresholds so we can create a yellow group via backdating
     await h.setFastThresholds({
