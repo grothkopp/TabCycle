@@ -1116,6 +1116,40 @@ describe('group-sorting', () => {
       expect(tabMeta[10].groupId).toBe(100);
     });
 
+    it('should recreate stale special group id before moving tab', async () => {
+      const tabs = [
+        { id: 10, windowId: 1, groupId: -1, pinned: false },
+      ];
+      chrome.tabGroups.query.mockResolvedValue([]);
+      chrome.tabs.query.mockImplementation(async (q) => {
+        if (q.windowId !== undefined) return tabs;
+        if (q.groupId === 50) throw new Error('No group with id: 50.');
+        if (q.groupId === 100) return [{ id: 10, windowId: 1, groupId: 100, pinned: false }];
+        return [];
+      });
+
+      chrome.tabs.group.mockResolvedValueOnce(100);
+      chrome.tabGroups.update.mockResolvedValueOnce({ id: 100, title: 'Yellow', color: 'yellow' });
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
+      };
+
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      expect(result.tabsMoved).toBe(1);
+      expect(windowState[1].specialGroups.yellow).toBe(100);
+      expect(tabMeta[10].groupId).toBe(100);
+      expect(tabMeta[10].isSpecialGroup).toBe(true);
+      expect(chrome.tabs.group).not.toHaveBeenCalledWith(expect.objectContaining({
+        groupId: 50,
+      }));
+    });
+
     it('should not move ungrouped green tab', async () => {
       const groups = [];
       const tabs = [

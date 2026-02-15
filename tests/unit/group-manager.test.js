@@ -188,6 +188,31 @@ describe('group-manager', () => {
       }));
     });
 
+    it('should recreate special group when stored id is stale', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: 5, red: null }, groupZones: {} },
+      };
+
+      chrome.tabs.query.mockImplementation(async (query) => {
+        if (query.groupId === 5) throw new Error('No group with id: 5.');
+        return [];
+      });
+      chrome.tabs.group.mockResolvedValueOnce(200);
+      chrome.tabGroups.update.mockResolvedValueOnce({ id: 200, title: 'Yellow', color: 'yellow' });
+
+      const result = await moveTabToSpecialGroup(42, 'yellow', 1, windowState);
+
+      expect(result).toEqual({ success: true, groupId: 200 });
+      expect(windowState[1].specialGroups.yellow).toBe(200);
+      expect(chrome.tabs.group).toHaveBeenCalledWith({
+        tabIds: [42],
+        createProperties: { windowId: 1 },
+      });
+      expect(chrome.tabs.group).not.toHaveBeenCalledWith(expect.objectContaining({
+        groupId: 5,
+      }));
+    });
+
     it('should create group first if it does not exist', async () => {
       const windowState = {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },

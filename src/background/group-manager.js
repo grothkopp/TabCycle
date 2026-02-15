@@ -179,23 +179,21 @@ export async function removeSpecialGroupIfEmpty(windowId, type, windowState) {
 
 export async function moveTabToSpecialGroup(tabId, type, windowId, windowState) {
   const ws = ensureWindowState(windowId, windowState);
-  let groupId = ws.specialGroups[type];
+  const ensured = await ensureSpecialGroup(windowId, type, windowState, tabId);
+  let groupId = ensured.groupId;
 
   if (groupId === null) {
-    const result = await ensureSpecialGroup(windowId, type, windowState, tabId);
-    groupId = result.groupId;
-    if (groupId === null) {
-      logger.warn('Could not create special group for tab move', {
-        tabId,
-        type,
-        windowId,
-        errorCode: ERROR_CODES.ERR_GROUP_CREATE,
-      });
-      return { success: false };
-    }
-    if (result.created) {
-      return { success: true, groupId };
-    }
+    logger.warn('Could not create special group for tab move', {
+      tabId,
+      type,
+      windowId,
+      errorCode: ERROR_CODES.ERR_GROUP_CREATE,
+    });
+    return { success: false };
+  }
+
+  if (ensured.created) {
+    return { success: true, groupId };
   }
 
   try {
@@ -203,6 +201,30 @@ export async function moveTabToSpecialGroup(tabId, type, windowId, windowState) 
     logger.debug('Moved tab to special group', { tabId, type, groupId });
     return { success: true, groupId };
   } catch (err) {
+    // Group may have been deleted between validation and move.
+    if (err?.message?.includes('No group with id')) {
+      ws.specialGroups[type] = null;
+      const retry = await ensureSpecialGroup(windowId, type, windowState, tabId);
+      groupId = retry.groupId;
+      if (groupId !== null) {
+        if (retry.created) return { success: true, groupId };
+        try {
+          await chrome.tabs.group({ tabIds: [tabId], groupId });
+          logger.debug('Moved tab to recreated special group', { tabId, type, groupId });
+          return { success: true, groupId };
+        } catch (retryErr) {
+          logger.error('Failed to move tab to special group', {
+            tabId,
+            type,
+            groupId,
+            error: retryErr.message,
+            errorCode: ERROR_CODES.ERR_TAB_GROUP,
+          });
+          return { success: false };
+        }
+      }
+    }
+
     logger.error('Failed to move tab to special group', {
       tabId,
       type,
