@@ -80,6 +80,24 @@
       </section>
 
       <section class="setting-group">
+        <h2>Auto-Name Unnamed Groups</h2>
+        <p class="description">Automatically name unnamed tab groups after a delay using a short 1-2 word summary.</p>
+        <label class="checkbox-label">
+          <input type="checkbox" id="autoGroupNamingEnabled" checked>
+          <span>Enable automatic group naming</span>
+        </label>
+
+        <div class="auto-name-delay-row">
+          <label for="autoGroupNamingDelayMinutes">Delay before naming</label>
+          <div class="auto-name-delay-input">
+            <input type="number" id="autoGroupNamingDelayMinutes" min="1" step="1" value="5" required>
+            <span class="delay-unit">minutes</span>
+          </div>
+          <span class="error" id="autoGroupNamingDelayMinutes-error"></span>
+        </div>
+      </section>
+
+      <section class="setting-group">
         <h2>Bookmark Closed Tabs</h2>
         <p class="description">Save tabs and tab groups closed by TabCycle as bookmarks for later recovery.</p>
         <label class="checkbox-label">

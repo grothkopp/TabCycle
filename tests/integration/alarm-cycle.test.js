@@ -29,6 +29,7 @@ globalThis.chrome = {
     TAB_GROUP_ID_NONE: -1,
     update: jest.fn(async () => ({})),
     query: jest.fn(async () => []),
+    get: jest.fn(async (groupId) => ({ id: groupId, windowId: 1, title: '' })),
     move: jest.fn(async () => {}),
   },
   tabs: {
@@ -42,6 +43,7 @@ globalThis.chrome = {
 
 const { STORAGE_KEYS, DEFAULT_THRESHOLDS, TIME_MODE, STATUS } = await import('../../src/shared/constants.js');
 const { evaluateAllTabs } = await import('../../src/background/status-evaluator.js');
+const { autoNameEligibleGroups } = await import('../../src/background/group-manager.js');
 
 describe('alarm-cycle integration', () => {
   beforeEach(() => {
@@ -158,5 +160,147 @@ describe('alarm-cycle integration', () => {
 
     const transitions = evaluateAllTabs(tabMeta, 0, settings);
     expect(transitions[1]).toEqual({ oldStatus: 'green', newStatus: 'yellow' });
+  });
+
+  it('should skip auto-naming before the configured delay is reached', async () => {
+    const now = Date.now();
+    chrome.tabGroups.query.mockResolvedValueOnce([
+      { id: 401, windowId: 1, title: '' },
+    ]);
+
+    const windowState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          401: {
+            firstUnnamedSeenAt: now - (4 * 60 * 1000),
+            lastAutoNamedAt: null,
+            lastCandidate: null,
+            userEditLockUntil: now - 1000,
+          },
+        },
+      },
+    };
+
+    const result = await autoNameEligibleGroups(1, {}, windowState, {
+      enabled: true,
+      delayMinutes: 5,
+      nowMs: now,
+    });
+
+    expect(result.named).toBe(0);
+    expect(result.skipped).toBeGreaterThan(0);
+    expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+  });
+
+  it('should auto-name age-only titled groups after delay with 1-2 words', async () => {
+    const now = Date.now();
+    chrome.tabGroups.query.mockResolvedValueOnce([
+      { id: 402, windowId: 1, title: '(8m)' },
+    ]);
+    chrome.tabs.query.mockResolvedValueOnce([
+      { id: 1, groupId: 402, title: 'React Testing Library', url: 'https://react.dev/learn', pinned: false },
+      { id: 2, groupId: 402, title: 'React Hooks Guide', url: 'https://react.dev/reference', pinned: false },
+    ]);
+    chrome.tabGroups.get.mockResolvedValueOnce({ id: 402, windowId: 1, title: '(8m)' });
+
+    const windowState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          402: {
+            firstUnnamedSeenAt: now - (6 * 60 * 1000),
+            lastAutoNamedAt: null,
+            lastCandidate: null,
+            userEditLockUntil: now - 1000,
+          },
+        },
+      },
+    };
+
+    const result = await autoNameEligibleGroups(1, {}, windowState, {
+      enabled: true,
+      delayMinutes: 5,
+      nowMs: now,
+    });
+
+    expect(result.named).toBe(1);
+    const call = chrome.tabGroups.update.mock.calls.find(([groupId]) => groupId === 402);
+    expect(call).toBeDefined();
+    const writtenTitle = call[1].title;
+    expect(writtenTitle).toMatch(/\(\d+[mhd]\)$/);
+    const base = writtenTitle.replace(/\s?\(\d+[mhd]\)$/, '');
+    expect(base.length).toBeGreaterThan(0);
+    expect(base.split(/\s+/).length).toBeLessThanOrEqual(2);
+  });
+
+  it('should skip auto-naming when a user edit lock is active', async () => {
+    const now = Date.now();
+    chrome.tabGroups.query.mockResolvedValueOnce([
+      { id: 403, windowId: 1, title: '' },
+    ]);
+
+    const windowState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          403: {
+            firstUnnamedSeenAt: now - (10 * 60 * 1000),
+            lastAutoNamedAt: null,
+            lastCandidate: null,
+            userEditLockUntil: now + 10_000,
+          },
+        },
+      },
+    };
+
+    const result = await autoNameEligibleGroups(1, {}, windowState, {
+      enabled: true,
+      delayMinutes: 5,
+      nowMs: now,
+    });
+
+    expect(result.named).toBe(0);
+    expect(result.skipped).toBeGreaterThan(0);
+    expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+  });
+
+  it('should abort auto-naming if group becomes user-named before update', async () => {
+    const now = Date.now();
+    chrome.tabGroups.query.mockResolvedValueOnce([
+      { id: 404, windowId: 1, title: '' },
+    ]);
+    chrome.tabs.query.mockResolvedValueOnce([
+      { id: 11, groupId: 404, title: 'Team Notes', url: 'https://docs.example.com', pinned: false },
+    ]);
+    chrome.tabGroups.get.mockResolvedValueOnce({ id: 404, windowId: 1, title: 'Manual Name' });
+
+    const windowState = {
+      1: {
+        specialGroups: { yellow: null, red: null },
+        groupZones: {},
+        groupNaming: {
+          404: {
+            firstUnnamedSeenAt: now - (10 * 60 * 1000),
+            lastAutoNamedAt: null,
+            lastCandidate: null,
+            userEditLockUntil: now - 1000,
+          },
+        },
+      },
+    };
+
+    const result = await autoNameEligibleGroups(1, {}, windowState, {
+      enabled: true,
+      delayMinutes: 5,
+      nowMs: now,
+    });
+
+    expect(result.named).toBe(0);
+    expect(result.skipped).toBeGreaterThan(0);
+    expect(chrome.tabGroups.update).not.toHaveBeenCalled();
   });
 });

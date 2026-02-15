@@ -17,6 +17,14 @@ globalThis.chrome = {
   },
   tabGroups: {
     TAB_GROUP_ID_NONE: -1,
+    query: jest.fn(async (query) => (
+      mockGroups.filter((g) => (query?.windowId === undefined ? true : g.windowId === query.windowId))
+    )),
+    get: jest.fn(async (groupId) => {
+      const group = mockGroups.find((g) => g.id === groupId);
+      if (!group) throw new Error(`No group with id: ${groupId}`);
+      return group;
+    }),
     update: jest.fn(async (groupId, props) => {
       const group = mockGroups.find((g) => g.id === groupId);
       if (group) Object.assign(group, props);
@@ -47,6 +55,13 @@ const {
   isSpecialGroup,
   moveTabToSpecialGroup,
   dissolveUnnamedSingleTabGroups,
+  parseGroupTitle,
+  composeGroupTitle,
+  isBaseGroupNameEmpty,
+  stripAgeSuffix,
+  autoNameEligibleGroups,
+  applyUserEditLock,
+  consumeExpectedExtensionTitleUpdate,
   trackExtensionGroup,
   untrackExtensionGroup,
 } = await import('../../src/background/group-manager.js');
@@ -57,6 +72,26 @@ describe('group-manager', () => {
     mockGroups.length = 0;
     mockTabs.length = 0;
     mockGroupIdCounter = 100;
+    chrome.tabGroups.query = jest.fn(async (query) => (
+      mockGroups.filter((g) => (query?.windowId === undefined ? true : g.windowId === query.windowId))
+    ));
+    chrome.tabGroups.get = jest.fn(async (groupId) => {
+      const group = mockGroups.find((g) => g.id === groupId);
+      if (!group) throw new Error(`No group with id: ${groupId}`);
+      return group;
+    });
+    chrome.tabGroups.update = jest.fn(async (groupId, props) => {
+      const group = mockGroups.find((g) => g.id === groupId);
+      if (group) Object.assign(group, props);
+      return group;
+    });
+    chrome.tabs.query = jest.fn(async (query) => (
+      mockTabs.filter((t) => {
+        if (query.groupId !== undefined && t.groupId !== query.groupId) return false;
+        if (query.windowId !== undefined && t.windowId !== query.windowId) return false;
+        return true;
+      })
+    ));
   });
 
   describe('isSpecialGroup', () => {
@@ -395,6 +430,229 @@ describe('group-manager', () => {
       const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('auto-name metadata and user-edit lock', () => {
+    it('should set a user edit lock for unnamed groups', () => {
+      const now = Date.now();
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            7: {
+              firstUnnamedSeenAt: now - 6000,
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now - 1000,
+            },
+          },
+        },
+      };
+
+      const result = applyUserEditLock(1, { id: 7, title: '(2m)' }, windowState, 15_000, now);
+      expect(result.locked).toBe(true);
+      expect(windowState[1].groupNaming[7].firstUnnamedSeenAt).toBe(now - 6000);
+      expect(windowState[1].groupNaming[7].userEditLockUntil).toBeGreaterThan(now);
+    });
+
+    it('should clear naming metadata when group gets a base name', () => {
+      const now = Date.now();
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            8: {
+              firstUnnamedSeenAt: now - 10_000,
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now + 5000,
+            },
+          },
+        },
+      };
+
+      const result = applyUserEditLock(1, { id: 8, title: 'My Group (2m)' }, windowState, 15_000, now);
+      expect(result.locked).toBe(false);
+      expect(windowState[1].groupNaming[8]).toBeUndefined();
+    });
+  });
+
+  describe('autoNameEligibleGroups', () => {
+    it('should auto-name an eligible unnamed group after delay and preserve age suffix', async () => {
+      const now = Date.now();
+      mockGroups.push({ id: 30, windowId: 1, title: '(6m)', color: 'green' });
+      mockTabs.push(
+        { id: 101, windowId: 1, groupId: 30, title: 'React Testing Library', url: 'https://react.dev/learn', pinned: false },
+        { id: 102, windowId: 1, groupId: 30, title: 'React Hooks Guide', url: 'https://react.dev/reference', pinned: false }
+      );
+
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            30: {
+              firstUnnamedSeenAt: now - (6 * 60 * 1000),
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now - 1000,
+            },
+          },
+        },
+      };
+
+      const summary = await autoNameEligibleGroups(1, {}, windowState, {
+        enabled: true,
+        delayMinutes: 5,
+        nowMs: now,
+      });
+
+      expect(summary.named).toBe(1);
+      const group = mockGroups.find((g) => g.id === 30);
+      expect(group.title).toMatch(/\(\d+[mhd]\)$/);
+      const baseName = stripAgeSuffix(group.title);
+      expect(baseName.length).toBeGreaterThan(0);
+      expect(baseName.split(/\s+/).length).toBeLessThanOrEqual(2);
+    });
+
+    it('should skip auto-naming while user edit lock is active', async () => {
+      const now = Date.now();
+      mockGroups.push({ id: 31, windowId: 1, title: '', color: 'green' });
+      mockTabs.push(
+        { id: 111, windowId: 1, groupId: 31, title: 'Kubernetes Docs', url: 'https://kubernetes.io/docs', pinned: false },
+      );
+
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            31: {
+              firstUnnamedSeenAt: now - (10 * 60 * 1000),
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now + 10_000,
+            },
+          },
+        },
+      };
+
+      const summary = await autoNameEligibleGroups(1, {}, windowState, {
+        enabled: true,
+        delayMinutes: 5,
+        nowMs: now,
+      });
+
+      expect(summary.named).toBe(0);
+      expect(summary.skipped).toBeGreaterThan(0);
+      expect(chrome.tabGroups.update).not.toHaveBeenCalledWith(31, expect.any(Object));
+    });
+
+    it('should abort if group gets a user name before write', async () => {
+      const now = Date.now();
+      mockGroups.push({ id: 32, windowId: 1, title: '', color: 'green' });
+      mockTabs.push(
+        { id: 121, windowId: 1, groupId: 32, title: 'Design Review', url: 'https://figma.com/file/abc', pinned: false },
+      );
+
+      const originalGet = chrome.tabGroups.get;
+      chrome.tabGroups.get = jest.fn(async () => ({ id: 32, windowId: 1, title: 'User Name' }));
+
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            32: {
+              firstUnnamedSeenAt: now - (8 * 60 * 1000),
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now - 1000,
+            },
+          },
+        },
+      };
+
+      try {
+        const summary = await autoNameEligibleGroups(1, {}, windowState, {
+          enabled: true,
+          delayMinutes: 5,
+          nowMs: now,
+        });
+
+        expect(summary.named).toBe(0);
+        expect(summary.skipped).toBeGreaterThan(0);
+        expect(chrome.tabGroups.update).not.toHaveBeenCalledWith(32, expect.any(Object));
+      } finally {
+        chrome.tabGroups.get = originalGet;
+      }
+    });
+
+    it('should expose extension title-update markers for user-edit filtering', async () => {
+      const now = Date.now();
+      mockGroups.push({ id: 33, windowId: 1, title: '', color: 'green' });
+      mockTabs.push(
+        { id: 131, windowId: 1, groupId: 33, title: 'Postgres Query Plans', url: 'https://postgresql.org/docs/current', pinned: false },
+      );
+
+      const windowState = {
+        1: {
+          specialGroups: { yellow: null, red: null },
+          groupZones: {},
+          groupNaming: {
+            33: {
+              firstUnnamedSeenAt: now - (9 * 60 * 1000),
+              lastAutoNamedAt: null,
+              lastCandidate: null,
+              userEditLockUntil: now - 1000,
+            },
+          },
+        },
+      };
+
+      await autoNameEligibleGroups(1, {}, windowState, {
+        enabled: true,
+        delayMinutes: 5,
+        nowMs: now,
+      });
+
+      const group = mockGroups.find((g) => g.id === 33);
+      expect(group).toBeDefined();
+      expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(true);
+      expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(false);
+    });
+  });
+
+  describe('group title parsing and composition', () => {
+    it('should parse base name and age suffix from titled groups', () => {
+      expect(parseGroupTitle('News (23m)')).toEqual({ baseName: 'News', ageSuffix: '(23m)' });
+    });
+
+    it('should treat age-only title as empty base name', () => {
+      expect(parseGroupTitle('(5m)')).toEqual({ baseName: '', ageSuffix: '(5m)' });
+      expect(isBaseGroupNameEmpty('(5m)')).toBe(true);
+    });
+
+    it('should keep non-age titles intact', () => {
+      expect(parseGroupTitle('Project Alpha')).toEqual({ baseName: 'Project Alpha', ageSuffix: '' });
+      expect(isBaseGroupNameEmpty('Project Alpha')).toBe(false);
+    });
+
+    it('should compose titles deterministically from base + suffix', () => {
+      expect(composeGroupTitle('News', '(2h)')).toBe('News (2h)');
+      expect(composeGroupTitle('', '(2h)')).toBe('(2h)');
+      expect(composeGroupTitle('News', '')).toBe('News');
+    });
+
+    it('should be idempotent for parse + compose', () => {
+      const original = 'Engineering (3d)';
+      const parsed = parseGroupTitle(original);
+      const rebuilt = composeGroupTitle(parsed.baseName, parsed.ageSuffix);
+      expect(rebuilt).toBe(original);
+      expect(stripAgeSuffix(rebuilt)).toBe('Engineering');
     });
   });
 });

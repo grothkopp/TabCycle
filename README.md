@@ -10,6 +10,7 @@ A Chrome extension that manages the lifecycle of opened tabs with refresh-time t
 - **Status Transitions**: Tabs progress through Green → Yellow → Red → Gone based on configurable thresholds
 - **Special Groups**: Ungrouped aging tabs are automatically sorted into "Yellow" and "Red" tab groups
 - **Group Zone Sorting**: User-created tab groups are color-coded and sorted into zones (Green | Yellow | Red)
+- **Auto-Name Unnamed Groups**: Unnamed user/extension groups are auto-named after a configurable delay using concise 1-2 word summaries
 - **Smart Tab Placement**: New tabs are placed contextually based on the active tab's group
 - **User Control Preserved**: Manual group names, ordering within zones, and tab moves are never overridden
 - **Multi-Window Support**: Global active time with per-window sorting
@@ -32,6 +33,10 @@ Open the extension options page (`chrome://extensions/ → TabCycle → Details 
   - Green → Yellow (default: 4 hours)
   - Yellow → Red (default: 8 hours)
   - Red → Gone/Close (default: 24 hours)
+- **Auto-Name Unnamed Groups**:
+  - Enable/disable automatic group naming (default: enabled)
+  - Delay before naming an unnamed group (default: 5 minutes)
+- **Group Age Display**: Optionally append group age to titles without changing the base name
 
 ## Permissions
 
@@ -57,6 +62,9 @@ npm run test:unit
 
 # Run integration tests only
 npm run test:integration
+
+# Run real Chrome E2E tests (requires browser/display access)
+npm run test:e2e-chrome
 ```
 
 ## Architecture
@@ -71,7 +79,8 @@ src/
 │   ├── status-evaluator.js    # Tab status computation
 │   ├── tab-tracker.js         # Tab metadata management
 │   ├── tab-placer.js          # Context-aware new tab placement
-│   └── group-manager.js       # Special groups, zone sorting, colors
+│   ├── group-manager.js       # Special groups, zone sorting, colors, title updates
+│   └── group-name-generator.js # Deterministic 1-2 word group name generation
 ├── options/
 │   ├── options.html           # Settings page
 │   ├── options.js             # Settings logic

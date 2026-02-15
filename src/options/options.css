@@ -228,3 +228,49 @@ h2 {
   border-color: #e53e3e;
   box-shadow: 0 0 0 2px rgba(229, 62, 62, 0.15);
 }
+
+.auto-name-delay-row {
+  margin-top: 16px;
+}
+
+.auto-name-delay-row label {
+  display: block;
+  font-weight: 500;
+  margin-bottom: 6px;
+  font-size: 0.9rem;
+}
+
+.auto-name-delay-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auto-name-delay-input input[type="number"] {
+  width: 100px;
+  padding: 8px 12px;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.auto-name-delay-input input[type="number"]:focus {
+  border-color: #4a90d9;
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
+}
+
+.auto-name-delay-input input[type="number"].invalid {
+  border-color: #e53e3e;
+  box-shadow: 0 0 0 2px rgba(229, 62, 62, 0.15);
+}
+
+.auto-name-delay-input .delay-unit {
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.auto-name-delay-row.disabled {
+  opacity: 0.6;
+}

@@ -46,6 +46,16 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     );
     expect(hasGreenToYellow).toBe(true);
 
+    const hasAutoNamingToggle = await page.evaluate(() =>
+      document.getElementById('autoGroupNamingEnabled') !== null
+    );
+    expect(hasAutoNamingToggle).toBe(true);
+
+    const hasAutoNamingDelay = await page.evaluate(() =>
+      document.getElementById('autoGroupNamingDelayMinutes') !== null
+    );
+    expect(hasAutoNamingDelay).toBe(true);
+
     await page.close();
   }, 15_000);
 
@@ -175,4 +185,32 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     await h.closeTab(tab1);
     await h.closeTab(tab2);
   }, 35_000);
+
+  it('auto-naming settings persist via options controls', async () => {
+    const page = await h.browser.newPage();
+    await page.goto(`chrome-extension://${h.extensionId}/options/options.html`);
+    await sleep(500);
+
+    await page.click('#autoGroupNamingDelayMinutes', { clickCount: 3 });
+    await page.type('#autoGroupNamingDelayMinutes', '9');
+    await page.click('#autoGroupNamingEnabled');
+    await page.click('#save-btn');
+    await sleep(1000);
+
+    const settings = await h.getSettings();
+    expect(settings.autoGroupNamingEnabled).toBe(false);
+    expect(settings.autoGroupNamingDelayMinutes).toBe(9);
+
+    await page.click('#autoGroupNamingEnabled');
+    await page.click('#autoGroupNamingDelayMinutes', { clickCount: 3 });
+    await page.type('#autoGroupNamingDelayMinutes', '5');
+    await page.click('#save-btn');
+    await sleep(1000);
+
+    const restored = await h.getSettings();
+    expect(restored.autoGroupNamingEnabled).toBe(true);
+    expect(restored.autoGroupNamingDelayMinutes).toBe(5);
+
+    await page.close();
+  }, 20_000);
 });
