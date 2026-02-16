@@ -75,25 +75,6 @@
 - What happens when [boundary condition]?
 - How does system handle [error scenario]?
 
-### E2E Test Considerations
-
-<!--
-  ACTION REQUIRED: For Chrome extension projects, identify which acceptance scenarios
-  and edge cases require E2E testing with a real Chrome instance (Puppeteer + CDP).
-  E2E tests are needed when behavior depends on real Chrome API responses, tab strip
-  ordering, service worker lifecycle, or cross-context timing that cannot be captured
-  by unit tests with mocked APIs.
-
-  List scenarios that MUST have E2E coverage and explain why unit tests are insufficient.
-  Reference the constitution's E2E Testing with Puppeteer section for architecture
-  requirements.
--->
-
-- **E2E required for**: [List acceptance scenarios that need real Chrome verification]
-- **Why unit tests are insufficient**: [Explain what real Chrome behavior is being tested]
-- **Harness requirements**: [Any special harness capabilities needed, e.g., tab creation
-  from page context for openerTabId, wide thresholds for timing-sensitive tests]
-
 ## Requirements *(mandatory)*
 
 <!--

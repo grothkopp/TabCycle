@@ -64,9 +64,9 @@ src/
 └── lib/
 
 tests/
-├── unit/
+├── contract/
 ├── integration/
-└── e2e-chrome/          # Puppeteer + CDP E2E tests (see constitution §I)
+└── unit/
 
 # [REMOVE IF UNUSED] Option 2: Web application (when "frontend" + "backend" detected)
 backend/
@@ -93,39 +93,6 @@ ios/ or android/
 
 **Structure Decision**: [Document the selected structure and reference the real
 directories captured above]
-
-## Testing Strategy
-
-<!--
-  ACTION REQUIRED: For Chrome extension projects, this section MUST describe the
-  testing approach at all three layers per constitution Principle I.
--->
-
-### Unit Tests
-[Pure logic modules tested with Jest. List modules and what they cover.]
-
-### Integration Tests
-[Storage, messaging, and cross-context behavior. List test files.]
-
-### E2E Tests (Puppeteer + CDP)
-
-<!--
-  Per constitution §I, E2E tests MUST be included for Chrome extension projects.
-  They launch a real Chrome instance with the extension loaded and verify actual
-  outcomes via CDP. They are NOT part of the default test command.
-
-  Document:
-  - Which user stories / acceptance scenarios are covered by E2E tests
-  - The harness architecture (keeper tab, state cleanup, deterministic eval triggering)
-  - Any extension-side hooks exposed for testability (e.g., globalThis exports)
-  - Known timing considerations (tab creation delays, threshold margins)
-  - The command to run E2E tests (e.g., npm run test:e2e-chrome)
--->
-
-**E2E test suites**: [List test files and what they cover]
-**Run command**: `npm run test:e2e-chrome`
-**When to run**: After core logic changes, Chrome API changes, before releases
-(see constitution §I for full guidance)
 
 ## Complexity Tracking
 
