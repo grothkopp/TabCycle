@@ -99,13 +99,18 @@ async function _runSortAndUpdate(windowId) {
     }
 
     await dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowState);
-    await sortTabsAndGroups(windowId, tabMeta, windowState, undefined, settings);
+
+    // Only sort tabs/groups based on aging status when the master toggle is on.
+    // When aging is disabled, stale statuses must not drive tab placement or group reordering.
+    const agingOn = settings.agingEnabled !== false;
+    if (agingOn) {
+      await sortTabsAndGroups(windowId, tabMeta, windowState, undefined, settings);
+    }
 
     const autoNaming = resolveAutoGroupNamingSettings(settings);
     await autoNameEligibleGroups(windowId, tabMeta, windowState, autoNaming);
 
     // Update group titles with age if enabled (gated on agingEnabled in T009)
-    const agingOn = settings.agingEnabled !== false;
     const showGroupAge = agingOn && (typeof settings.showGroupAge === 'boolean'
       ? settings.showGroupAge
       : DEFAULT_SHOW_GROUP_AGE);
@@ -675,9 +680,11 @@ async function _handleNavigationEvent(tabId, source) {
     }
 
     // For tabs in user groups: update group color and re-sort immediately.
-    // Double-check against windowState to never touch special group colors.
+    // All aging-driven visual updates (color, sorting) are suppressed when the
+    // master agingEnabled toggle is off, so stale statuses cannot move tabs.
+    const agingOn = settings.agingEnabled !== false;
     const groupId = updated.groupId;
-    if (groupId !== null && !updated.isSpecialGroup
+    if (agingOn && groupId !== null && !updated.isSpecialGroup
         && !isSpecialGroup(groupId, existing.windowId, windowState)) {
       if (settings.tabgroupColoringEnabled !== false) {
         const groupStatus = computeGroupStatus(groupId, tabMeta);
@@ -686,7 +693,9 @@ async function _handleNavigationEvent(tabId, source) {
         }
       }
     }
-    await sortTabsAndGroups(existing.windowId, tabMeta, windowState, undefined, settings);
+    if (agingOn) {
+      await sortTabsAndGroups(existing.windowId, tabMeta, windowState, undefined, settings);
+    }
 
     await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
     logger.debug('Navigation handled, refresh time reset', { tabId, source }, cid);
