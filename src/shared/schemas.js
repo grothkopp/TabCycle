@@ -44,6 +44,32 @@ export function validateSettings(obj) {
       errors.push('autoGroupNamingDelayMinutes must be a positive whole number');
     }
   }
+
+  // v2 toggle fields — all must be strict booleans when present
+  const booleanFields = [
+    'agingEnabled',
+    'tabSortingEnabled',
+    'tabgroupSortingEnabled',
+    'tabgroupColoringEnabled',
+    'greenToYellowEnabled',
+    'yellowToRedEnabled',
+    'redToGoneEnabled',
+    'autoGroupEnabled',
+  ];
+  for (const field of booleanFields) {
+    if (obj[field] !== undefined && typeof obj[field] !== 'boolean') {
+      errors.push(`${field} must be a boolean`);
+    }
+  }
+
+  // v2 group name fields — must be strings (empty string is valid)
+  if (obj.yellowGroupName !== undefined && typeof obj.yellowGroupName !== 'string') {
+    errors.push('yellowGroupName must be a string');
+  }
+  if (obj.redGroupName !== undefined && typeof obj.redGroupName !== 'string') {
+    errors.push('redGroupName must be a string');
+  }
+
   return { valid: errors.length === 0, errors };
 }
 

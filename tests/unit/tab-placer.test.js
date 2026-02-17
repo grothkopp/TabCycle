@@ -137,4 +137,77 @@ describe('tab-placer', () => {
     // Should have tried and failed, then fallen back to leftmost
     expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
   });
+
+  // ─── v2: autoGroupEnabled toggle ──────────────────────────────────────────
+
+  describe('autoGroupEnabled toggle', () => {
+    it('should skip all placement logic when autoGroupEnabled is false', async () => {
+      const newTab = { id: 20, windowId: 1, groupId: -1, pinned: false, index: 3, openerTabId: 10 };
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+      const tabMeta = {};
+      const settings = { autoGroupEnabled: false };
+
+      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+
+      // No grouping, no moving, no context tab lookup
+      expect(chrome.tabs.get).not.toHaveBeenCalled();
+      expect(chrome.tabs.group).not.toHaveBeenCalled();
+      expect(chrome.tabs.move).not.toHaveBeenCalled();
+    });
+
+    it('should proceed with normal placement when autoGroupEnabled is true', async () => {
+      const contextTab = { id: 10, windowId: 1, groupId: -1, pinned: false, index: 2 };
+      chrome.tabs.get.mockResolvedValueOnce(contextTab);
+
+      const newTab = { id: 20, windowId: 1, groupId: -1, pinned: false, index: 3, openerTabId: 10 };
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: null, isSpecialGroup: false, pinned: false },
+      };
+      const settings = { autoGroupEnabled: true };
+
+      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+
+      // Should group both tabs (Case 2: context ungrouped & unpinned)
+      expect(chrome.tabs.group).toHaveBeenCalledWith(expect.objectContaining({
+        tabIds: [10, 20],
+      }));
+    });
+
+    it('should proceed with placement when settings is undefined (backward compat)', async () => {
+      const newTab = { id: 20, windowId: 1, groupId: -1, pinned: false, index: 0 };
+      const windowState = {};
+      const tabMeta = {};
+
+      await placeNewTab(newTab, 1, tabMeta, windowState, undefined);
+
+      // Should still run the placement logic (no context tab → leftmost)
+      expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
+    });
+
+    it('should proceed with placement when settings has no autoGroupEnabled key', async () => {
+      const contextTab = { id: 10, windowId: 1, groupId: -1, pinned: false, index: 2 };
+      chrome.tabs.get.mockResolvedValueOnce(contextTab);
+
+      const newTab = { id: 20, windowId: 1, groupId: -1, pinned: false, index: 3, openerTabId: 10 };
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: null, isSpecialGroup: false, pinned: false },
+      };
+      const settings = { tabSortingEnabled: true }; // no autoGroupEnabled
+
+      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+
+      // Should proceed (autoGroupEnabled defaults to true when absent)
+      expect(chrome.tabs.group).toHaveBeenCalled();
+    });
+  });
 });

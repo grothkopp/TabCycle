@@ -1,168 +1,294 @@
+/* ─── Base ─────────────────────────────────────────────────────────────────── */
+
 * {
+  box-sizing: border-box;
   margin: 0;
   padding: 0;
-  box-sizing: border-box;
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: #f5f5f5;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
   color: #333;
-  line-height: 1.6;
+  background: #f5f5f5;
+  padding: 16px;
 }
 
 .container {
-  max-width: 560px;
-  margin: 40px auto;
-  padding: 32px;
+  max-width: 640px;
+  margin: 0 auto;
   background: #fff;
-  border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  border-radius: 8px;
+  padding: 24px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 h1 {
-  font-size: 1.5rem;
+  font-size: 20px;
   font-weight: 600;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   color: #1a1a1a;
 }
 
-h2 {
-  font-size: 1rem;
-  font-weight: 600;
-  margin-bottom: 4px;
-  color: #1a1a1a;
-}
+/* ─── Sections ────────────────────────────────────────────────────────────── */
 
-.description {
-  font-size: 0.85rem;
-  color: #666;
-  margin-bottom: 12px;
-}
-
-.setting-group {
-  margin-bottom: 28px;
-  padding-bottom: 24px;
-  border-bottom: 1px solid #eee;
-}
-
-.setting-group:last-of-type {
-  border-bottom: none;
-}
-
-.radio-label {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 8px 0;
-  cursor: pointer;
-  flex-wrap: wrap;
-}
-
-.radio-label input[type="radio"] {
-  margin-top: 2px;
-}
-
-.radio-label span:first-of-type {
-  font-weight: 500;
-  min-width: 100px;
-}
-
-.hint {
-  font-size: 0.8rem;
-  color: #888;
-}
-
-.threshold-row {
+.section {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 16px;
   margin-bottom: 16px;
 }
 
-.threshold-row label {
+.section-header {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+
+.sub-header {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 16px 0 8px;
+  color: #444;
+}
+
+.sub-label {
   display: block;
   font-weight: 500;
-  margin-bottom: 6px;
-  font-size: 0.9rem;
+  margin-bottom: 4px;
+  color: #555;
+}
+
+/* ─── Hierarchy Indentation ───────────────────────────────────────────────── */
+
+.hierarchy-child {
+  margin-left: 24px;
+  padding-left: 12px;
+  border-left: 2px solid #e8e8e8;
+}
+
+.hierarchy-grandchild {
+  margin-left: 24px;
+  padding-left: 12px;
+  border-left: 2px solid #f0f0f0;
+}
+
+/* ─── Grey-out (Disabled Group) ───────────────────────────────────────────── */
+
+.disabled-group {
+  opacity: 0.45;
+  pointer-events: none;
+  transition: opacity 0.08s ease;
+}
+
+/* Ensure disabled inputs look visually greyed even outside .disabled-group */
+input:disabled,
+select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* ─── Checkboxes & Radios ─────────────────────────────────────────────────── */
+
+.checkbox-label,
+.radio-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.checkbox-label input[type="checkbox"],
+.radio-label input[type="radio"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.hint {
+  display: block;
+  font-size: 12px;
+  color: #888;
+  margin-left: 22px;
+}
+
+/* ─── Transition Blocks ───────────────────────────────────────────────────── */
+
+.transitions-container {
+  margin-top: 8px;
+}
+
+.transition-block {
+  padding: 8px 0;
+  margin-bottom: 4px;
+}
+
+.transition-block + .transition-block {
+  border-top: 1px solid #f0f0f0;
+}
+
+/* ─── Threshold Inputs ────────────────────────────────────────────────────── */
+
+.threshold-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+
+.threshold-row > label {
+  min-width: 100px;
+  font-size: 13px;
+  color: #555;
 }
 
 .threshold-input {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  gap: 4px;
 }
 
 .threshold-input input[type="number"] {
-  width: 100px;
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.threshold-input input[type="number"]:focus {
-  border-color: #4a90d9;
-  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
-}
-
-.threshold-input input[type="number"].invalid {
-  border-color: #e53e3e;
-  box-shadow: 0 0 0 2px rgba(229, 62, 62, 0.15);
+  width: 80px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
 }
 
 .threshold-input select {
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.9rem;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 13px;
   background: #fff;
-  outline: none;
-  cursor: pointer;
 }
 
-.threshold-input select:focus {
-  border-color: #4a90d9;
+/* ─── Text Inputs ─────────────────────────────────────────────────────────── */
+
+input[type="text"] {
+  width: 100%;
+  max-width: 240px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+  margin-top: 4px;
 }
+
+input[type="text"]::placeholder {
+  color: #bbb;
+}
+
+/* ─── Auto-name Delay ─────────────────────────────────────────────────────── */
+
+.auto-name-delay-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+
+.auto-name-delay-row > label {
+  font-size: 13px;
+  color: #555;
+}
+
+.auto-name-delay-input {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.auto-name-delay-input input[type="number"] {
+  width: 60px;
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 14px;
+}
+
+.delay-unit {
+  font-size: 13px;
+  color: #666;
+}
+
+/* ─── Collapsible Details ─────────────────────────────────────────────────── */
+
+.detail-section {
+  margin: 8px 0;
+}
+
+.detail-section summary {
+  font-size: 13px;
+  font-weight: 500;
+  color: #666;
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+
+.detail-section summary:hover {
+  color: #333;
+}
+
+.detail-section .detail-content {
+  padding: 8px 0 4px;
+}
+
+/* ─── Error States ────────────────────────────────────────────────────────── */
 
 .error {
   display: block;
-  font-size: 0.8rem;
-  color: #e53e3e;
-  margin-top: 4px;
-  min-height: 1.2em;
+  font-size: 12px;
+  color: #d32f2f;
+  min-height: 0;
 }
+
+input.invalid {
+  border-color: #d32f2f;
+}
+
+/* ─── Save Button & Status ────────────────────────────────────────────────── */
 
 .actions {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-top: 8px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #e0e0e0;
 }
 
 #save-btn {
-  padding: 10px 24px;
-  background: #4a90d9;
+  padding: 8px 20px;
+  background: #1a73e8;
   color: #fff;
   border: none;
-  border-radius: 6px;
-  font-size: 0.9rem;
+  border-radius: 4px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: background 0.2s;
+  transition: background 0.15s;
 }
 
 #save-btn:hover {
-  background: #357abd;
+  background: #1557b0;
 }
 
 #save-btn:active {
-  background: #2a6099;
+  background: #13459e;
 }
 
 .save-status {
-  font-size: 0.85rem;
-  color: #38a169;
+  font-size: 13px;
+  color: #2e7d32;
   opacity: 0;
-  transition: opacity 0.3s;
+  transition: opacity 0.2s;
 }
 
 .save-status.visible {
@@ -170,107 +296,18 @@ h2 {
 }
 
 .save-status.error-status {
-  color: #e53e3e;
+  color: #d32f2f;
 }
 
-.checkbox-label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 0;
-  cursor: pointer;
-}
-
-.checkbox-label input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  cursor: pointer;
-}
-
-.checkbox-label span {
-  font-weight: 500;
-}
-
-.bookmark-hint {
-  display: block;
-  margin-top: 4px;
-  padding-left: 24px;
-}
+/* ─── Folder Name Row ─────────────────────────────────────────────────────── */
 
 .folder-name-row {
-  margin-top: 16px;
+  margin: 6px 0;
 }
 
-.folder-name-row label {
+.folder-name-row > label {
   display: block;
-  font-weight: 500;
-  margin-bottom: 6px;
-  font-size: 0.9rem;
-}
-
-.folder-name-row input[type="text"] {
-  width: 100%;
-  max-width: 300px;
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.folder-name-row input[type="text"]:focus {
-  border-color: #4a90d9;
-  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
-}
-
-.folder-name-row input[type="text"].invalid {
-  border-color: #e53e3e;
-  box-shadow: 0 0 0 2px rgba(229, 62, 62, 0.15);
-}
-
-.auto-name-delay-row {
-  margin-top: 16px;
-}
-
-.auto-name-delay-row label {
-  display: block;
-  font-weight: 500;
-  margin-bottom: 6px;
-  font-size: 0.9rem;
-}
-
-.auto-name-delay-input {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.auto-name-delay-input input[type="number"] {
-  width: 100px;
-  padding: 8px 12px;
-  border: 1px solid #ddd;
-  border-radius: 6px;
-  font-size: 0.9rem;
-  outline: none;
-  transition: border-color 0.2s;
-}
-
-.auto-name-delay-input input[type="number"]:focus {
-  border-color: #4a90d9;
-  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.15);
-}
-
-.auto-name-delay-input input[type="number"].invalid {
-  border-color: #e53e3e;
-  box-shadow: 0 0 0 2px rgba(229, 62, 62, 0.15);
-}
-
-.auto-name-delay-input .delay-unit {
-  font-size: 0.85rem;
-  color: #666;
-}
-
-.auto-name-delay-row.disabled {
-  opacity: 0.6;
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 4px;
 }

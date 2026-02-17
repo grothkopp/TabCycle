@@ -4,6 +4,10 @@ import { readState, batchWrite } from './state-persistence.js';
 
 const logger = createLogger('background');
 
+// Design decision (research.md R3): The active time accumulator runs independently
+// of all settings toggles (agingEnabled, etc.). When aging is paused, the clock
+// keeps ticking so that tab ages remain accurate when aging resumes. The age cap
+// (applied on re-enable in service-worker.js) prevents mass tab closure.
 let cachedActiveTime = null;
 let loadingPromise = null;
 

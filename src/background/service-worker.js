@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_AUTO_GROUP_NAMING, DEFAULT_SHOW_GROUP_AGE, TIME_MODE, STATUS, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_AUTO_GROUP_NAMING, DEFAULT_SHOW_GROUP_AGE, DEFAULT_AGING_TOGGLES, DEFAULT_TRANSITION_TOGGLES, DEFAULT_GROUP_NAMES, DEFAULT_AUTO_GROUP, TIME_MODE, STATUS, ERROR_CODES, SPECIAL_GROUP_TYPES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
 import { createTabEntry, handleNavigation, reconcileTabs } from './tab-tracker.js';
@@ -12,6 +12,7 @@ import {
   updateGroupColor,
   sortTabsAndGroups,
   dissolveUnnamedSingleTabGroups,
+  dissolveSpecialGroups,
   autoNameEligibleGroups,
   applyUserEditLock,
   consumeExpectedExtensionTitleUpdate,
@@ -98,15 +99,21 @@ async function _runSortAndUpdate(windowId) {
     }
 
     await dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowState);
-    await sortTabsAndGroups(windowId, tabMeta, windowState);
+
+    // Only sort tabs/groups based on aging status when the master toggle is on.
+    // When aging is disabled, stale statuses must not drive tab placement or group reordering.
+    const agingOn = settings.agingEnabled !== false;
+    if (agingOn) {
+      await sortTabsAndGroups(windowId, tabMeta, windowState, undefined, settings);
+    }
 
     const autoNaming = resolveAutoGroupNamingSettings(settings);
     await autoNameEligibleGroups(windowId, tabMeta, windowState, autoNaming);
 
-    // Update group titles with age if enabled
-    const showGroupAge = typeof settings.showGroupAge === 'boolean'
+    // Update group titles with age if enabled (gated on agingEnabled in T009)
+    const showGroupAge = agingOn && (typeof settings.showGroupAge === 'boolean'
       ? settings.showGroupAge
-      : DEFAULT_SHOW_GROUP_AGE;
+      : DEFAULT_SHOW_GROUP_AGE);
     if (showGroupAge) {
       const currentActiveTime = await getCurrentActiveTime();
       await updateGroupTitlesWithAge(windowId, tabMeta, windowState, currentActiveTime, settings);
@@ -141,14 +148,30 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
           redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
         },
+        // v2 aging toggles
+        agingEnabled: DEFAULT_AGING_TOGGLES.AGING_ENABLED,
+        tabSortingEnabled: DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
+        tabgroupSortingEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
+        tabgroupColoringEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
+        showGroupAge: DEFAULT_SHOW_GROUP_AGE,
+        // v2 transition toggles
+        greenToYellowEnabled: DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
+        yellowToRedEnabled: DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
+        redToGoneEnabled: DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
+        // v2 group names
+        yellowGroupName: DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
+        redGroupName: DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
+        // Bookmark settings
         bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
         bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
+        // Auto-group settings (independent of aging)
+        autoGroupEnabled: DEFAULT_AUTO_GROUP.ENABLED,
         autoGroupNamingEnabled: DEFAULT_AUTO_GROUP_NAMING.ENABLED,
         autoGroupNamingDelayMinutes: DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES,
       };
 
       await batchWrite({
-        [STORAGE_KEYS.SCHEMA_VERSION]: 1,
+        [STORAGE_KEYS.SCHEMA_VERSION]: 2,
         [STORAGE_KEYS.SETTINGS]: defaultSettings,
         [STORAGE_KEYS.TAB_META]: {},
         [STORAGE_KEYS.WINDOW_STATE]: {},
@@ -157,6 +180,33 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 
       await initActiveTime();
       logger.info('Storage initialized with defaults', null, cid);
+    }
+
+    // v1 → v2 migration: add new fields with defaults, preserve existing fields
+    if (details.reason === 'update') {
+      const state = await readState([STORAGE_KEYS.SCHEMA_VERSION, STORAGE_KEYS.SETTINGS]);
+      const schemaVersion = state[STORAGE_KEYS.SCHEMA_VERSION];
+      if (schemaVersion === 1) {
+        const existing = state[STORAGE_KEYS.SETTINGS] || {};
+        const migrated = {
+          ...existing,
+          agingEnabled: existing.agingEnabled ?? DEFAULT_AGING_TOGGLES.AGING_ENABLED,
+          tabSortingEnabled: existing.tabSortingEnabled ?? DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
+          tabgroupSortingEnabled: existing.tabgroupSortingEnabled ?? DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
+          tabgroupColoringEnabled: existing.tabgroupColoringEnabled ?? DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
+          greenToYellowEnabled: existing.greenToYellowEnabled ?? DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
+          yellowToRedEnabled: existing.yellowToRedEnabled ?? DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
+          redToGoneEnabled: existing.redToGoneEnabled ?? DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
+          yellowGroupName: existing.yellowGroupName ?? DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
+          redGroupName: existing.redGroupName ?? DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
+          autoGroupEnabled: existing.autoGroupEnabled ?? DEFAULT_AUTO_GROUP.ENABLED,
+        };
+        await batchWrite({
+          [STORAGE_KEYS.SCHEMA_VERSION]: 2,
+          [STORAGE_KEYS.SETTINGS]: migrated,
+        });
+        logger.info('Migrated settings from schema v1 to v2', { fieldsAdded: 10 }, cid);
+      }
     }
 
     await chrome.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MINUTES });
@@ -256,6 +306,16 @@ async function _runEvaluationCycleInner(cid) {
   const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
   const currentActiveTime = await getCurrentActiveTime();
 
+  // When aging is disabled, skip the entire status evaluation and per-window operations.
+  // The alarm still fires and active time still accumulates, but tabs freeze in their current state.
+  const agingEnabled = settings.agingEnabled !== false; // default true for legacy settings
+  if (!agingEnabled) {
+    logger.debug('Aging disabled, skipping evaluation cycle', {
+      tabCount: Object.keys(tabMeta).length,
+    }, cid);
+    return;
+  }
+
   // Diagnostic: log active time state and settings for debugging age calculations
   const activeTimeState = await getCachedActiveTimeState();
   logger.info('Evaluation cycle start', {
@@ -327,7 +387,7 @@ async function _runEvaluationCycleInner(cid) {
     // Unified sort: reads browser state, moves ungrouped tabs to special
     // groups as needed, closes gone tabs/groups, then sorts remaining
     // groups into zone order
-    await sortTabsAndGroups(wid, tabMeta, windowState, goneConfig);
+    await sortTabsAndGroups(wid, tabMeta, windowState, goneConfig, settings);
 
     await autoNameEligibleGroups(wid, tabMeta, windowState, autoNaming);
 
@@ -375,9 +435,10 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     // Track the new tab in meta
     const currentActiveTime = await getCurrentActiveTime();
     const entry = createTabEntry(tab, currentActiveTime);
-    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
+    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+    const settings = state[STORAGE_KEYS.SETTINGS] || {};
     tabMeta[tab.id] = entry;
 
     // Context-aware placement for non-command-created tabs (e.g., middle-click, link open)
@@ -385,7 +446,7 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     // chrome.tabs.group() inside placeNewTab cannot race with our batchWrite.
     tabPlacementRunning = true;
     try {
-      await placeNewTab(tab, tab.windowId, tabMeta, windowState);
+      await placeNewTab(tab, tab.windowId, tabMeta, windowState, settings);
       // Persist all meta changes (includes group updates from placeNewTab)
       await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
     } finally {
@@ -556,9 +617,10 @@ async function _handleNavigationEvent(tabId, source) {
       }
     } catch { /* tab gone — will be caught below */ }
 
-    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
+    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+    const settings = state[STORAGE_KEYS.SETTINGS] || {};
     const existing = tabMeta[tabId] || tabMeta[String(tabId)];
     if (!existing) {
       logger.debug('Navigation for untracked tab, skipping', { tabId, source }, cid);
@@ -618,16 +680,22 @@ async function _handleNavigationEvent(tabId, source) {
     }
 
     // For tabs in user groups: update group color and re-sort immediately.
-    // Double-check against windowState to never touch special group colors.
+    // All aging-driven visual updates (color, sorting) are suppressed when the
+    // master agingEnabled toggle is off, so stale statuses cannot move tabs.
+    const agingOn = settings.agingEnabled !== false;
     const groupId = updated.groupId;
-    if (groupId !== null && !updated.isSpecialGroup
+    if (agingOn && groupId !== null && !updated.isSpecialGroup
         && !isSpecialGroup(groupId, existing.windowId, windowState)) {
-      const groupStatus = computeGroupStatus(groupId, tabMeta);
-      if (groupStatus) {
-        await updateGroupColor(groupId, groupStatus);
+      if (settings.tabgroupColoringEnabled !== false) {
+        const groupStatus = computeGroupStatus(groupId, tabMeta);
+        if (groupStatus) {
+          await updateGroupColor(groupId, groupStatus);
+        }
       }
     }
-    await sortTabsAndGroups(existing.windowId, tabMeta, windowState);
+    if (agingOn) {
+      await sortTabsAndGroups(existing.windowId, tabMeta, windowState, undefined, settings);
+    }
 
     await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
     logger.debug('Navigation handled, refresh time reset', { tabId, source }, cid);
@@ -770,10 +838,31 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
   try {
     const state = await readState([STORAGE_KEYS.WINDOW_STATE]);
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
-    // If this is a special group, ignore user modifications to title/color
-    // (TabCycle will re-apply on next evaluation cycle)
+    // T017: Detect user-initiated renames of special groups and persist to settings
     if (isSpecialGroup(group.id, group.windowId, windowState)) {
-      logger.debug('Special group updated, will re-apply on next cycle', { groupId: group.id }, cid);
+      // Check if this title change was initiated by the extension (guard flag)
+      const extensionTitleWrite = typeof group.title === 'string'
+        && consumeExpectedExtensionTitleUpdate(group.id, group.title);
+      const extensionColorWrite = typeof group.color === 'string'
+        && consumeExpectedExtensionColorUpdate(group.id, group.color);
+
+      if (!extensionTitleWrite && typeof group.title === 'string') {
+        // User renamed the special group — persist to settings
+        const sgType = getSpecialGroupType(group.id, group.windowId, windowState);
+        if (sgType) {
+          const nameKey = sgType === SPECIAL_GROUP_TYPES.YELLOW ? 'yellowGroupName' : 'redGroupName';
+          const settingsState = await readState([STORAGE_KEYS.SETTINGS]);
+          const currentSettings = settingsState[STORAGE_KEYS.SETTINGS] || {};
+          if (currentSettings[nameKey] !== group.title) {
+            currentSettings[nameKey] = group.title;
+            await batchWrite({ [STORAGE_KEYS.SETTINGS]: currentSettings });
+            logger.info('User renamed special group, persisted to settings', {
+              groupId: group.id, type: sgType, newTitle: group.title,
+            }, cid);
+          }
+        }
+      }
+      // Ignore color changes on special groups (color is identity-based)
       return;
     }
 
@@ -815,6 +904,71 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
 
   const cid = logger.correlationId();
   if (changes[STORAGE_KEYS.SETTINGS]) {
+    const oldSettings = changes[STORAGE_KEYS.SETTINGS].oldValue || {};
+    const newSettings = changes[STORAGE_KEYS.SETTINGS].newValue || {};
+
+    // T010: Age cap — when agingEnabled transitions from false → true
+    if (oldSettings.agingEnabled === false && newSettings.agingEnabled !== false) {
+      try {
+        const state = await readState([STORAGE_KEYS.TAB_META]);
+        const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
+        const now = Date.now();
+        const currentActiveTime = await getCurrentActiveTime();
+        const redToGone = newSettings.thresholds?.redToGone || DEFAULT_THRESHOLDS.RED_TO_GONE;
+        const capWindow = redToGone + 60_000; // redToGone + 1 minute
+        const wallCapTimestamp = now - capWindow;
+        const activeCapTimestamp = currentActiveTime - capWindow;
+        let cappedCount = 0;
+
+        for (const meta of Object.values(tabMeta)) {
+          let changed = false;
+          if (meta.refreshWallTime < wallCapTimestamp) {
+            meta.refreshWallTime = wallCapTimestamp;
+            changed = true;
+          }
+          if (meta.refreshActiveTime < activeCapTimestamp) {
+            meta.refreshActiveTime = activeCapTimestamp;
+            changed = true;
+          }
+          if (changed) cappedCount++;
+        }
+
+        if (cappedCount > 0) {
+          await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+          logger.info('Age cap applied on aging re-enable', {
+            cappedCount,
+            tabCount: Object.keys(tabMeta).length,
+            capWindowMs: capWindow,
+          }, cid);
+        } else {
+          logger.debug('Age cap check: no tabs needed capping', {
+            tabCount: Object.keys(tabMeta).length,
+          }, cid);
+        }
+      } catch (err) {
+        logger.error('Failed to apply age cap', { error: err.message }, cid);
+      }
+    }
+
+    // T012: Dissolution — when tabSortingEnabled transitions from true → false
+    if (oldSettings.tabSortingEnabled !== false && newSettings.tabSortingEnabled === false) {
+      try {
+        await _dissolveAllSpecialGroups(cid);
+      } catch (err) {
+        logger.error('Failed to dissolve special groups', { error: err.message }, cid);
+      }
+    }
+
+    // T018: Reactive group name update — when yellowGroupName or redGroupName changes
+    if (oldSettings.yellowGroupName !== newSettings.yellowGroupName
+        || oldSettings.redGroupName !== newSettings.redGroupName) {
+      try {
+        await _updateSpecialGroupNames(newSettings, cid);
+      } catch (err) {
+        logger.error('Failed to update special group names', { error: err.message }, cid);
+      }
+    }
+
     logger.info('Settings changed, triggering re-evaluation', null, cid);
     try {
       await runEvaluationCycle(cid);
@@ -823,6 +977,63 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     }
   }
 });
+
+// ─── Reactive Settings Helpers ────────────────────────────────────────────────
+
+/**
+ * T012: Dissolve special groups in all windows when tab sorting is disabled.
+ */
+async function _dissolveAllSpecialGroups(cid) {
+  const state = await readState([STORAGE_KEYS.WINDOW_STATE]);
+  const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+  let totalDissolved = 0;
+  const windowIds = Object.keys(windowState).map(Number);
+
+  for (const windowId of windowIds) {
+    const { dissolved } = await dissolveSpecialGroups(windowId, windowState);
+    totalDissolved += dissolved;
+  }
+
+  if (totalDissolved > 0) {
+    await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+    logger.info('Dissolved special groups on tabSortingEnabled=false', {
+      windowIds,
+      windowCount: windowIds.length,
+      totalDissolved,
+    }, cid);
+  } else {
+    logger.debug('No special groups to dissolve', { windowIds }, cid);
+  }
+}
+
+/**
+ * T018: Update special group titles when group name settings change.
+ */
+async function _updateSpecialGroupNames(settings, cid) {
+  const state = await readState([STORAGE_KEYS.WINDOW_STATE]);
+  const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+  let updated = 0;
+
+  for (const [windowId, ws] of Object.entries(windowState)) {
+    for (const type of ['yellow', 'red']) {
+      const groupId = ws.specialGroups?.[type];
+      if (groupId === null || groupId === undefined) continue;
+      const nameKey = type === 'yellow' ? 'yellowGroupName' : 'redGroupName';
+      const newTitle = settings[nameKey] ?? '';
+      try {
+        await chrome.tabGroups.update(groupId, { title: newTitle });
+        updated++;
+        logger.debug('Updated special group name', { windowId, type, groupId, newTitle }, cid);
+      } catch (err) {
+        logger.warn('Failed to update special group name', { windowId, type, groupId, error: err.message }, cid);
+      }
+    }
+  }
+
+  if (updated > 0) {
+    logger.info('Reactive group name update complete', { updated }, cid);
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 

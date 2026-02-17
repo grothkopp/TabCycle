@@ -110,6 +110,7 @@ async function loadServiceWorker() {
     updateGroupColor: jest.fn(async () => {}),
     sortTabsAndGroups: jest.fn(async () => {}),
     dissolveUnnamedSingleTabGroups: jest.fn(async () => ({ dissolved: 0 })),
+    dissolveSpecialGroups: jest.fn(async () => ({ dissolved: 0 })),
     autoNameEligibleGroups: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
     applyUserEditLock: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
     consumeExpectedExtensionTitleUpdate: jest.fn(() => false),

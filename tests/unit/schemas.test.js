@@ -108,6 +108,138 @@ describe('validateSettings', () => {
     expect(result.valid).toBe(true);
   });
 
+  // ─── v2 aging toggle fields ─────────────────────────────────────────────────
+  describe('v2 aging toggle fields', () => {
+    const booleanFields = [
+      'agingEnabled',
+      'tabSortingEnabled',
+      'tabgroupSortingEnabled',
+      'tabgroupColoringEnabled',
+      'greenToYellowEnabled',
+      'yellowToRedEnabled',
+      'redToGoneEnabled',
+      'autoGroupEnabled',
+    ];
+
+    for (const field of booleanFields) {
+      it(`should pass when ${field} is true`, () => {
+        const result = validateSettings({ ...validSettings, [field]: true });
+        expect(result.valid).toBe(true);
+      });
+
+      it(`should pass when ${field} is false`, () => {
+        const result = validateSettings({ ...validSettings, [field]: false });
+        expect(result.valid).toBe(true);
+      });
+
+      it(`should fail when ${field} is a string`, () => {
+        const result = validateSettings({ ...validSettings, [field]: 'true' });
+        expect(result.valid).toBe(false);
+        expect(result.errors.some((e) => e.includes(field))).toBe(true);
+      });
+
+      it(`should fail when ${field} is a number`, () => {
+        const result = validateSettings({ ...validSettings, [field]: 1 });
+        expect(result.valid).toBe(false);
+        expect(result.errors.some((e) => e.includes(field))).toBe(true);
+      });
+
+      it(`should pass when ${field} is undefined (backward compatibility)`, () => {
+        const s = { ...validSettings };
+        delete s[field];
+        const result = validateSettings(s);
+        expect(result.valid).toBe(true);
+      });
+    }
+  });
+
+  // ─── v2 group name fields ──────────────────────────────────────────────────
+  describe('v2 group name fields', () => {
+    it('should pass with empty yellowGroupName', () => {
+      const result = validateSettings({ ...validSettings, yellowGroupName: '' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('should pass with non-empty yellowGroupName', () => {
+      const result = validateSettings({ ...validSettings, yellowGroupName: 'Aging' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('should fail for non-string yellowGroupName', () => {
+      const result = validateSettings({ ...validSettings, yellowGroupName: 123 });
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('yellowGroupName'))).toBe(true);
+    });
+
+    it('should pass when yellowGroupName is undefined (backward compatibility)', () => {
+      const result = validateSettings(validSettings);
+      expect(result.valid).toBe(true);
+    });
+
+    it('should pass with empty redGroupName', () => {
+      const result = validateSettings({ ...validSettings, redGroupName: '' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('should pass with non-empty redGroupName', () => {
+      const result = validateSettings({ ...validSettings, redGroupName: 'Old' });
+      expect(result.valid).toBe(true);
+    });
+
+    it('should fail for non-string redGroupName', () => {
+      const result = validateSettings({ ...validSettings, redGroupName: true });
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('redGroupName'))).toBe(true);
+    });
+
+    it('should fail for boolean yellowGroupName', () => {
+      const result = validateSettings({ ...validSettings, yellowGroupName: false });
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('yellowGroupName'))).toBe(true);
+    });
+  });
+
+  // ─── v2 combined fields ────────────────────────────────────────────────────
+  describe('v2 combined field validation', () => {
+    it('should pass with all v2 fields set to valid values', () => {
+      const result = validateSettings({
+        ...validSettings,
+        agingEnabled: true,
+        tabSortingEnabled: false,
+        tabgroupSortingEnabled: true,
+        tabgroupColoringEnabled: false,
+        greenToYellowEnabled: true,
+        yellowToRedEnabled: false,
+        redToGoneEnabled: true,
+        autoGroupEnabled: false,
+        yellowGroupName: 'Aging',
+        redGroupName: '',
+      });
+      expect(result.valid).toBe(true);
+    });
+
+    it('should accumulate multiple v2 validation errors', () => {
+      const result = validateSettings({
+        ...validSettings,
+        agingEnabled: 'yes',
+        tabSortingEnabled: 0,
+        yellowGroupName: 42,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors.length).toBeGreaterThanOrEqual(3);
+    });
+
+    it('should validate existing fields unchanged alongside v2 fields', () => {
+      const result = validateSettings({
+        timeMode: 'active',
+        thresholds: { greenToYellow: -1, yellowToRed: 100, redToGone: 200 },
+        agingEnabled: true,
+      });
+      expect(result.valid).toBe(false);
+      expect(result.errors.some((e) => e.includes('greenToYellow'))).toBe(true);
+    });
+  });
+
   it('should pass with valid auto group naming settings', () => {
     const result = validateSettings({
       ...validSettings,

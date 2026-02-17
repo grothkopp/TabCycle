@@ -213,4 +213,146 @@ describe('storage-persistence integration', () => {
     const result = await readState([STORAGE_KEYS.WINDOW_STATE]);
     expect(result[STORAGE_KEYS.WINDOW_STATE]).toEqual(cleanedState);
   });
+
+  // ── v2 toggle field persistence tests ──────────────────────────────────────
+
+  it('should persist all v2 aging toggle fields', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      agingEnabled: false,
+      tabSortingEnabled: false,
+      tabgroupSortingEnabled: true,
+      tabgroupColoringEnabled: false,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].tabSortingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].tabgroupSortingEnabled).toBe(true);
+    expect(result[STORAGE_KEYS.SETTINGS].tabgroupColoringEnabled).toBe(false);
+  });
+
+  it('should persist all v2 transition toggle fields', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      greenToYellowEnabled: false,
+      yellowToRedEnabled: true,
+      redToGoneEnabled: false,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].greenToYellowEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].yellowToRedEnabled).toBe(true);
+    expect(result[STORAGE_KEYS.SETTINGS].redToGoneEnabled).toBe(false);
+  });
+
+  it('should persist v2 group name fields including empty strings', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      yellowGroupName: '',
+      redGroupName: 'Urgent',
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].yellowGroupName).toBe('');
+    expect(result[STORAGE_KEYS.SETTINGS].redGroupName).toBe('Urgent');
+  });
+
+  it('should persist autoGroupEnabled toggle', async () => {
+    const settings = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      autoGroupEnabled: false,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS].autoGroupEnabled).toBe(false);
+  });
+
+  it('should persist complete v2 settings with all toggle combinations', async () => {
+    const fullSettings = {
+      timeMode: 'wallclock',
+      thresholds: { greenToYellow: 5000, yellowToRed: 10000, redToGone: 20000 },
+      agingEnabled: false,
+      tabSortingEnabled: true,
+      tabgroupSortingEnabled: false,
+      tabgroupColoringEnabled: true,
+      showGroupAge: true,
+      greenToYellowEnabled: true,
+      yellowToRedEnabled: false,
+      redToGoneEnabled: true,
+      yellowGroupName: 'Warming Up',
+      redGroupName: '',
+      bookmarkEnabled: false,
+      bookmarkFolderName: 'Archive',
+      autoGroupEnabled: false,
+      autoGroupNamingEnabled: true,
+      autoGroupNamingDelayMinutes: 15,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: fullSettings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    expect(result[STORAGE_KEYS.SETTINGS]).toEqual(fullSettings);
+  });
+
+  it('should persist disabled fields even when parent toggle is off', async () => {
+    // Settings where agingEnabled is false but child toggles have non-default values
+    const settings = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      agingEnabled: false,
+      tabSortingEnabled: false,
+      tabgroupSortingEnabled: false,
+      tabgroupColoringEnabled: false,
+      greenToYellowEnabled: false,
+      yellowToRedEnabled: false,
+      redToGoneEnabled: false,
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+
+    // All disabled child values must be preserved (not reset to defaults)
+    expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].tabSortingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].tabgroupSortingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].tabgroupColoringEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].greenToYellowEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].yellowToRedEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].redToGoneEnabled).toBe(false);
+  });
+
+  it('should overwrite v2 toggle values on subsequent writes', async () => {
+    const initial = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 14400000, yellowToRed: 28800000, redToGone: 86400000 },
+      agingEnabled: true,
+      yellowGroupName: 'Old Name',
+    };
+
+    await writeState({ [STORAGE_KEYS.SETTINGS]: initial });
+
+    const updated = {
+      ...initial,
+      agingEnabled: false,
+      yellowGroupName: 'New Name',
+    };
+    await writeState({ [STORAGE_KEYS.SETTINGS]: updated });
+
+    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
+    expect(result[STORAGE_KEYS.SETTINGS].yellowGroupName).toBe('New Name');
+  });
 });

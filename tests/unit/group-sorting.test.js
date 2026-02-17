@@ -1528,4 +1528,190 @@ describe('group-sorting', () => {
       expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
     });
   });
+
+  // ─── v2: Split sorting gate tests ──────────────────────────────────────────
+
+  describe('sortTabsAndGroups – v2 toggle gates', () => {
+    it('should skip tab sorting but still do group sorting when tabSortingEnabled=false, tabgroupSortingEnabled=true', async () => {
+      // Ungrouped yellow tab should NOT be moved to special group when tabSortingEnabled=false
+      // But group zone-sorting should still work
+      const groups = [
+        { id: 2, windowId: 1, title: 'B', color: 'yellow' },
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 20, windowId: 1, groupId: 2, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+        { id: 30, windowId: 1, groupId: -1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: null, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: true, tabgroupColoringEnabled: true };
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+
+      // Tab 30 should NOT be moved to special group (tab sorting disabled)
+      expect(result.tabsMoved).toBe(0);
+      expect(tabMeta[30].isSpecialGroup).toBe(false);
+      expect(tabMeta[30].groupId).toBeNull();
+
+      // Groups should still be zone-sorted (green before yellow)
+      expect(result.groupsMoved).toBeGreaterThan(0);
+    });
+
+    it('should skip group sorting when tabgroupSortingEnabled=false', async () => {
+      // Groups are out of order but tabgroupSortingEnabled=false → no moves
+      const groups = [
+        { id: 2, windowId: 1, title: 'B', color: 'yellow' },
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 20, windowId: 1, groupId: 2, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { tabSortingEnabled: true, tabgroupSortingEnabled: false, tabgroupColoringEnabled: true };
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+
+      // Groups should NOT be moved
+      expect(result.groupsMoved).toBe(0);
+      expect(chrome.tabGroups.move).not.toHaveBeenCalled();
+    });
+
+    it('should skip color updates when tabgroupColoringEnabled=false', async () => {
+      const groups = [
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { tabSortingEnabled: true, tabgroupSortingEnabled: true, tabgroupColoringEnabled: false };
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+
+      // Color updates should NOT have been called
+      const colorUpdateCalls = chrome.tabGroups.update.mock.calls.filter(
+        (c) => c[1] && c[1].color !== undefined
+      );
+      expect(colorUpdateCalls).toHaveLength(0);
+    });
+
+    it('should skip both tab sorting and group sorting when both disabled', async () => {
+      const groups = [
+        { id: 2, windowId: 1, title: 'B', color: 'red' },
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 20, windowId: 1, groupId: 2, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+        { id: 30, windowId: 1, groupId: -1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'red', isSpecialGroup: false, pinned: false },
+        30: { tabId: 30, windowId: 1, groupId: null, status: 'red', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: false, tabgroupColoringEnabled: false };
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+
+      expect(result.tabsMoved).toBe(0);
+      expect(result.groupsMoved).toBe(0);
+      expect(chrome.tabGroups.move).not.toHaveBeenCalled();
+      expect(chrome.tabs.group).not.toHaveBeenCalled();
+    });
+
+    it('should still handle gone tabs even when tabSortingEnabled=false', async () => {
+      // Gone handling runs regardless of tabSortingEnabled
+      const groups = [];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: -1, pinned: false, url: 'https://example.com', title: 'Ex' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: null, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const gc = {
+        bookmarkEnabled: true,
+        bookmarkFolderId: 'folder-1',
+        bookmarkTab: jest.fn().mockResolvedValue(true),
+        bookmarkGroupTabs: jest.fn().mockResolvedValue({ created: 0, skipped: 0, failed: 0 }),
+        isBookmarkableUrl: jest.fn().mockReturnValue(true),
+      };
+
+      const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: false, tabgroupColoringEnabled: false };
+      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc, settings);
+
+      // Gone tabs should still be closed
+      expect(result.goneTabsClosed).toBe(1);
+      expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
+    });
+
+    it('should default all toggles to true when settings is undefined (backward compat)', async () => {
+      const groups = [
+        { id: 2, windowId: 1, title: 'B', color: 'yellow' },
+        { id: 1, windowId: 1, title: 'A', color: 'green' },
+      ];
+      const tabs = [
+        { id: 20, windowId: 1, groupId: 2, pinned: false },
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 2, status: 'yellow', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      // No settings → all toggles default to true → normal sorting
+      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+
+      // Should move groups to correct zone order
+      expect(result.groupsMoved).toBeGreaterThan(0);
+    });
+  });
 });

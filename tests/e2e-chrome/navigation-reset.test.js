@@ -96,7 +96,7 @@ describeOrSkip('Navigation Reset (real Chrome)', () => {
     expect(tab.groupId).not.toBe(-1);
 
     let group = await h.getGroup(tab.groupId);
-    expect(group.title).toBe('Red');
+    expect(group.title).toBe('');
 
     // Navigate → should ungroup and reset
     await h.navigateTab(tabId, 'https://example.org');

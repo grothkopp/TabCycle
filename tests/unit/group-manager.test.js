@@ -55,6 +55,7 @@ const {
   isSpecialGroup,
   moveTabToSpecialGroup,
   dissolveUnnamedSingleTabGroups,
+  dissolveSpecialGroups,
   updateGroupColor,
   parseGroupTitle,
   composeGroupTitle,
@@ -154,7 +155,7 @@ describe('group-manager', () => {
       const result = await ensureSpecialGroup(1, 'yellow', windowState, 42);
       expect(chrome.tabs.group).toHaveBeenCalled();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(100, expect.objectContaining({
-        title: 'Yellow',
+        title: '',
         color: 'yellow',
       }));
       expect(result.groupId).toBe(100);
@@ -169,7 +170,7 @@ describe('group-manager', () => {
 
       const result = await ensureSpecialGroup(1, 'red', windowState, 43);
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(101, expect.objectContaining({
-        title: 'Red',
+        title: '',
         color: 'red',
       }));
       expect(result.groupId).toBe(101);
@@ -665,6 +666,134 @@ describe('group-manager', () => {
       const rebuilt = composeGroupTitle(parsed.baseName, parsed.ageSuffix);
       expect(rebuilt).toBe(original);
       expect(stripAgeSuffix(rebuilt)).toBe('Engineering');
+    });
+  });
+
+  // ─── v2: dissolveSpecialGroups ─────────────────────────────────────────────
+
+  describe('dissolveSpecialGroups', () => {
+    it('should ungroup all tabs in yellow and red special groups', async () => {
+      mockTabs.push(
+        { id: 10, groupId: 50, windowId: 1 },
+        { id: 11, groupId: 50, windowId: 1 },
+        { id: 20, groupId: 60, windowId: 1 },
+      );
+      chrome.tabs.query.mockImplementation(async (q) => {
+        if (q.groupId === 50) return [{ id: 10 }, { id: 11 }];
+        if (q.groupId === 60) return [{ id: 20 }];
+        return [];
+      });
+
+      const windowState = {
+        1: { specialGroups: { yellow: 50, red: 60 }, groupZones: {} },
+      };
+
+      const result = await dissolveSpecialGroups(1, windowState);
+
+      expect(result.dissolved).toBe(2);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(11);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(20);
+      expect(windowState[1].specialGroups.yellow).toBeNull();
+      expect(windowState[1].specialGroups.red).toBeNull();
+    });
+
+    it('should handle window with no special groups', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await dissolveSpecialGroups(1, windowState);
+
+      expect(result.dissolved).toBe(0);
+      expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
+    });
+
+    it('should handle only yellow special group', async () => {
+      chrome.tabs.query.mockImplementation(async (q) => {
+        if (q.groupId === 50) return [{ id: 10 }];
+        return [];
+      });
+
+      const windowState = {
+        1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
+      };
+
+      const result = await dissolveSpecialGroups(1, windowState);
+
+      expect(result.dissolved).toBe(1);
+      expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
+      expect(windowState[1].specialGroups.yellow).toBeNull();
+    });
+
+    it('should return 0 dissolved for unknown windowId', async () => {
+      const windowState = {};
+
+      const result = await dissolveSpecialGroups(999, windowState);
+      expect(result.dissolved).toBe(0);
+    });
+  });
+
+  // ─── v2: ensureSpecialGroup with settings (group names from settings) ──────
+
+  describe('ensureSpecialGroup with settings', () => {
+    it('should use yellowGroupName from settings when creating yellow group', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { yellowGroupName: 'Aging Tabs', redGroupName: '' };
+      const result = await ensureSpecialGroup(1, 'yellow', windowState, 42, settings);
+
+      expect(result.groupId).toBeDefined();
+      expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
+        title: 'Aging Tabs',
+        color: 'yellow',
+      }));
+    });
+
+    it('should use redGroupName from settings when creating red group', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { yellowGroupName: '', redGroupName: 'Old Tabs' };
+      const result = await ensureSpecialGroup(1, 'red', windowState, 43, settings);
+
+      expect(result.groupId).toBeDefined();
+      expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
+        title: 'Old Tabs',
+        color: 'red',
+      }));
+    });
+
+    it('should use empty title when settings have empty group name', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const settings = { yellowGroupName: '', redGroupName: '' };
+      const result = await ensureSpecialGroup(1, 'yellow', windowState, 44, settings);
+
+      expect(result.groupId).toBeDefined();
+      expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
+        title: '',
+        color: 'yellow',
+      }));
+    });
+
+    it('should use empty title when settings is undefined (backward compat)', async () => {
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const result = await ensureSpecialGroup(1, 'yellow', windowState, 45, undefined);
+
+      expect(result.groupId).toBeDefined();
+      expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
+        title: '',
+        color: 'yellow',
+      }));
     });
   });
 });
