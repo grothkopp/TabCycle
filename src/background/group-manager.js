@@ -1214,16 +1214,21 @@ export async function dissolveSpecialGroups(windowId, windowState) {
 
     try {
       const tabs = await chrome.tabs.query({ groupId });
+      let allUngrouped = true;
       for (const tab of tabs) {
-        await ungroupTab(tab.id);
+        const ok = await ungroupTab(tab.id);
+        if (!ok) allUngrouped = false;
       }
-      dissolved++;
-      logger.debug('Dissolved special group', { windowId, type, groupId, tabCount: tabs.length });
+      if (allUngrouped) {
+        ws.specialGroups[type] = null;
+        dissolved++;
+        logger.debug('Dissolved special group', { windowId, type, groupId, tabCount: tabs.length });
+      } else {
+        logger.warn('Partial dissolution, retaining special group reference', { windowId, type, groupId });
+      }
     } catch (err) {
       logger.warn('Failed to dissolve special group', { windowId, type, groupId, error: err.message });
     }
-
-    ws.specialGroups[type] = null;
   }
 
   return { dissolved };
