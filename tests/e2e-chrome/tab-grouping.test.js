@@ -50,7 +50,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
 
     // The group should be the Yellow special group
     const group = await h.getGroup(tab.groupId);
-    expect(group.title).toBe('Yellow');
+    expect(group.title).toBe('');
     expect(group.color).toBe('yellow');
 
     // windowState should track this as a special group
@@ -71,7 +71,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
     expect(tab.groupId).not.toBe(-1);
 
     const group = await h.getGroup(tab.groupId);
-    expect(group.title).toBe('Red');
+    expect(group.title).toBe('');
     expect(group.color).toBe('red');
 
     const ws = await h.getWindowState();
@@ -91,7 +91,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
 
     let tab = await h.getTab(tabId);
     let group = await h.getGroup(tab.groupId);
-    expect(group.title).toBe('Yellow');
+    expect(group.title).toBe('');
 
     // Now make it red
     await h.backdateTab(tabId, 4500);
@@ -99,7 +99,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
 
     tab = await h.getTab(tabId);
     group = await h.getGroup(tab.groupId);
-    expect(group.title).toBe('Red');
+    expect(group.title).toBe('');
     expect(group.color).toBe('red');
 
     await h.closeTab(tabId);
@@ -121,7 +121,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
     expect(t1.groupId).toBe(t2.groupId);
 
     const group = await h.getGroup(t1.groupId);
-    expect(group.title).toBe('Yellow');
+    expect(group.title).toBe('');
 
     await h.closeTab(tab1);
     await h.closeTab(tab2);

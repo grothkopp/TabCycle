@@ -11,105 +11,199 @@
     <h1>TabCycle Settings</h1>
 
     <form id="settings-form">
-      <section class="setting-group">
-        <h2>Time Mode</h2>
-        <p class="description">Choose how tab age is measured.</p>
-        <label class="radio-label">
-          <input type="radio" name="timeMode" value="active" checked>
-          <span>Active Time</span>
-          <span class="hint">Only counts time while you're actively using Chrome</span>
-        </label>
-        <label class="radio-label">
-          <input type="radio" name="timeMode" value="wallclock">
-          <span>Wall Clock</span>
-          <span class="hint">Counts real elapsed time regardless of browser usage</span>
-        </label>
-      </section>
 
-      <section class="setting-group">
-        <h2>Thresholds</h2>
-        <p class="description">Set when tabs transition between statuses. Values must be in ascending order.</p>
+      <!-- ═══ Section 1: Aging ═══ -->
+      <section class="section" id="aging-section">
+        <h2 class="section-header">Aging</h2>
 
-        <div class="threshold-row">
-          <label for="greenToYellow">Green → Yellow</label>
-          <div class="threshold-input">
-            <input type="number" id="greenToYellow" min="1" step="1" required>
-            <select id="greenToYellowUnit">
-              <option value="minutes">minutes</option>
-              <option value="hours" selected>hours</option>
-              <option value="days">days</option>
-            </select>
-          </div>
-          <span class="error" id="greenToYellow-error"></span>
-        </div>
-
-        <div class="threshold-row">
-          <label for="yellowToRed">Yellow → Red</label>
-          <div class="threshold-input">
-            <input type="number" id="yellowToRed" min="1" step="1" required>
-            <select id="yellowToRedUnit">
-              <option value="minutes">minutes</option>
-              <option value="hours" selected>hours</option>
-              <option value="days">days</option>
-            </select>
-          </div>
-          <span class="error" id="yellowToRed-error"></span>
-        </div>
-
-        <div class="threshold-row">
-          <label for="redToGone">Red → Gone (Close)</label>
-          <div class="threshold-input">
-            <input type="number" id="redToGone" min="1" step="1" required>
-            <select id="redToGoneUnit">
-              <option value="minutes">minutes</option>
-              <option value="hours">hours</option>
-              <option value="days" selected>days</option>
-            </select>
-          </div>
-          <span class="error" id="redToGone-error"></span>
-        </div>
-      </section>
-
-      <section class="setting-group">
-        <h2>Group Age Display</h2>
-        <p class="description">Show the age of each tab group in its title (e.g. "News (23m)").</p>
         <label class="checkbox-label">
-          <input type="checkbox" id="showGroupAge">
-          <span>Show group age in title</span>
+          <input type="checkbox" id="agingEnabled" checked>
+          <span>Aging enabled</span>
         </label>
+
+        <details class="detail-section" id="aging-details">
+          <summary>Details</summary>
+          <div class="detail-content" data-parent="agingEnabled">
+
+            <div class="hierarchy-child">
+              <label class="sub-label">Time mode</label>
+              <label class="radio-label">
+                <input type="radio" name="timeMode" value="active" checked>
+                <span>Active time</span>
+                <span class="hint">Counts only while Chrome is focused</span>
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="timeMode" value="wallclock">
+                <span>Wall clock</span>
+                <span class="hint">Counts real elapsed time</span>
+              </label>
+            </div>
+
+            <div class="hierarchy-child">
+              <label class="sub-label">Sorting</label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="tabSortingEnabled" checked>
+                <span>Tab sorting</span>
+                <span class="hint">Sort ungrouped tabs into special groups</span>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="tabgroupSortingEnabled" checked>
+                <span>Tabgroup sorting</span>
+                <span class="hint">Sort tab groups by zone (green, yellow, red)</span>
+              </label>
+            </div>
+
+            <div class="hierarchy-child">
+              <label class="checkbox-label">
+                <input type="checkbox" id="tabgroupColoringEnabled" checked>
+                <span>Tabgroup coloring</span>
+                <span class="hint">Update group colors to match zone</span>
+              </label>
+            </div>
+
+            <div class="hierarchy-child">
+              <label class="checkbox-label">
+                <input type="checkbox" id="showGroupAge">
+                <span>Age in group title</span>
+                <span class="hint">Append age suffix (e.g. "News (23m)")</span>
+              </label>
+            </div>
+
+          </div>
+        </details>
+
+        <!-- ─── Transitions ─── -->
+        <div class="transitions-container" data-parent="agingEnabled">
+          <h3 class="sub-header">Transitions</h3>
+
+          <!-- Green → Yellow -->
+          <div class="transition-block" id="green-to-yellow-block">
+            <label class="checkbox-label">
+              <input type="checkbox" id="greenToYellowEnabled" checked>
+              <span>Green → Yellow</span>
+            </label>
+            <div class="hierarchy-child" data-parent="greenToYellowEnabled">
+              <div class="threshold-row">
+                <label for="greenToYellow">Transition time</label>
+                <div class="threshold-input">
+                  <input type="number" id="greenToYellow" min="1" step="1" required>
+                  <select id="greenToYellowUnit">
+                    <option value="minutes">minutes</option>
+                    <option value="hours" selected>hours</option>
+                    <option value="days">days</option>
+                  </select>
+                </div>
+                <span class="error" id="greenToYellow-error"></span>
+              </div>
+
+              <details class="detail-section">
+                <summary>Details</summary>
+                <div class="detail-content">
+                  <div class="hierarchy-grandchild">
+                    <label for="yellowGroupName">Yellow group name</label>
+                    <input type="text" id="yellowGroupName" value="" placeholder="(empty = no title)">
+                  </div>
+                </div>
+              </details>
+            </div>
+
+            <!-- Yellow → Red (nested under green→yellow) -->
+            <div class="transition-block hierarchy-child" id="yellow-to-red-block" data-parent="greenToYellowEnabled">
+              <label class="checkbox-label">
+                <input type="checkbox" id="yellowToRedEnabled" checked>
+                <span>Yellow → Red</span>
+              </label>
+              <div class="hierarchy-child" data-parent="yellowToRedEnabled">
+                <div class="threshold-row">
+                  <label for="yellowToRed">Transition time</label>
+                  <div class="threshold-input">
+                    <input type="number" id="yellowToRed" min="1" step="1" required>
+                    <select id="yellowToRedUnit">
+                      <option value="minutes">minutes</option>
+                      <option value="hours" selected>hours</option>
+                      <option value="days">days</option>
+                    </select>
+                  </div>
+                  <span class="error" id="yellowToRed-error"></span>
+                </div>
+
+                <details class="detail-section">
+                  <summary>Details</summary>
+                  <div class="detail-content">
+                    <div class="hierarchy-grandchild">
+                      <label for="redGroupName">Red group name</label>
+                      <input type="text" id="redGroupName" value="" placeholder="(empty = no title)">
+                    </div>
+                  </div>
+                </details>
+              </div>
+
+              <!-- Red → Gone (nested under yellow→red) -->
+              <div class="transition-block hierarchy-child" id="red-to-gone-block" data-parent="yellowToRedEnabled">
+                <label class="checkbox-label">
+                  <input type="checkbox" id="redToGoneEnabled" checked>
+                  <span>Red → Gone (Close)</span>
+                </label>
+                <div class="hierarchy-child" data-parent="redToGoneEnabled">
+                  <div class="threshold-row">
+                    <label for="redToGone">Transition time</label>
+                    <div class="threshold-input">
+                      <input type="number" id="redToGone" min="1" step="1" required>
+                      <select id="redToGoneUnit">
+                        <option value="minutes">minutes</option>
+                        <option value="hours">hours</option>
+                        <option value="days" selected>days</option>
+                      </select>
+                    </div>
+                    <span class="error" id="redToGone-error"></span>
+                  </div>
+
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="bookmarkEnabled" checked>
+                    <span>Bookmark closed tabs</span>
+                  </label>
+
+                  <details class="detail-section">
+                    <summary>Details</summary>
+                    <div class="detail-content">
+                      <div class="hierarchy-grandchild" data-parent="bookmarkEnabled">
+                        <label for="bookmarkFolderName">Bookmark folder name</label>
+                        <input type="text" id="bookmarkFolderName" value="Closed Tabs" placeholder="Closed Tabs">
+                        <span class="error" id="bookmarkFolderName-error"></span>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      <section class="setting-group">
-        <h2>Auto-Name Unnamed Groups</h2>
-        <p class="description">Automatically name unnamed tab groups after a delay using a short 1-2 word summary.</p>
+      <!-- ═══ Section 2: Auto-Tab-Groups ═══ -->
+      <section class="section" id="auto-tab-groups-section">
+        <h2 class="section-header">Auto-Tab-Groups</h2>
+
+        <label class="checkbox-label">
+          <input type="checkbox" id="autoGroupEnabled" checked>
+          <span>Create auto groups</span>
+          <span class="hint">Automatically group new tabs with their context tab</span>
+        </label>
+
         <label class="checkbox-label">
           <input type="checkbox" id="autoGroupNamingEnabled" checked>
-          <span>Enable automatic group naming</span>
+          <span>Auto-name groups</span>
+          <span class="hint">Automatically name unnamed tab groups after a delay</span>
         </label>
-
-        <div class="auto-name-delay-row">
-          <label for="autoGroupNamingDelayMinutes">Delay before naming</label>
-          <div class="auto-name-delay-input">
-            <input type="number" id="autoGroupNamingDelayMinutes" min="1" step="1" value="5" required>
-            <span class="delay-unit">minutes</span>
+        <div class="hierarchy-child" data-parent="autoGroupNamingEnabled">
+          <div class="auto-name-delay-row">
+            <label for="autoGroupNamingDelayMinutes">Delay before naming</label>
+            <div class="auto-name-delay-input">
+              <input type="number" id="autoGroupNamingDelayMinutes" min="1" step="1" value="5" required>
+              <span class="delay-unit">minutes</span>
+            </div>
+            <span class="error" id="autoGroupNamingDelayMinutes-error"></span>
           </div>
-          <span class="error" id="autoGroupNamingDelayMinutes-error"></span>
-        </div>
-      </section>
-
-      <section class="setting-group">
-        <h2>Bookmark Closed Tabs</h2>
-        <p class="description">Save tabs and tab groups closed by TabCycle as bookmarks for later recovery.</p>
-        <label class="checkbox-label">
-          <input type="checkbox" id="bookmarkEnabled" checked>
-          <span>Save closed tabs as bookmarks</span>
-        </label>
-        <span class="hint bookmark-hint">When enabled, tabs that reach the "Gone" state are saved as bookmarks in a dedicated folder under Other Bookmarks.</span>
-
-        <div class="folder-name-row">
-          <label for="bookmarkFolderName">Bookmark folder name</label>
-          <input type="text" id="bookmarkFolderName" value="Closed Tabs" placeholder="Closed Tabs">
-          <span class="error" id="bookmarkFolderName-error"></span>
         </div>
       </section>
 

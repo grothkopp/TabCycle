@@ -66,6 +66,10 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     );
     await sleep(500);
 
+    // Expand the Aging details section so the radio is visible
+    await page.click('#aging-details summary');
+    await sleep(200);
+
     // Click wallclock radio
     await page.click('input[name="timeMode"][value="wallclock"]');
     await page.click('#save-btn');
@@ -211,6 +215,125 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     expect(restored.autoGroupNamingEnabled).toBe(true);
     expect(restored.autoGroupNamingDelayMinutes).toBe(5);
 
+    await page.close();
+  }, 20_000);
+
+  // ── v2 toggle persistence tests ─────────────────────────────────────────
+
+  it('v2 aging toggle fields persist via direct storage write', async () => {
+    const settings = await h.getSettings();
+    settings.agingEnabled = false;
+    settings.tabSortingEnabled = false;
+    settings.tabgroupSortingEnabled = false;
+    settings.tabgroupColoringEnabled = false;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+
+    const stored = await h.getSettings();
+    expect(stored.agingEnabled).toBe(false);
+    expect(stored.tabSortingEnabled).toBe(false);
+    expect(stored.tabgroupSortingEnabled).toBe(false);
+    expect(stored.tabgroupColoringEnabled).toBe(false);
+
+    // Restore defaults
+    settings.agingEnabled = true;
+    settings.tabSortingEnabled = true;
+    settings.tabgroupSortingEnabled = true;
+    settings.tabgroupColoringEnabled = true;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+  }, 15_000);
+
+  it('v2 transition toggle fields persist', async () => {
+    const settings = await h.getSettings();
+    settings.greenToYellowEnabled = false;
+    settings.yellowToRedEnabled = false;
+    settings.redToGoneEnabled = false;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+
+    const stored = await h.getSettings();
+    expect(stored.greenToYellowEnabled).toBe(false);
+    expect(stored.yellowToRedEnabled).toBe(false);
+    expect(stored.redToGoneEnabled).toBe(false);
+
+    // Restore
+    settings.greenToYellowEnabled = true;
+    settings.yellowToRedEnabled = true;
+    settings.redToGoneEnabled = true;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+  }, 15_000);
+
+  it('v2 group name fields persist', async () => {
+    const settings = await h.getSettings();
+    settings.yellowGroupName = 'Stale Tabs';
+    settings.redGroupName = 'Urgent';
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+
+    const stored = await h.getSettings();
+    expect(stored.yellowGroupName).toBe('Stale Tabs');
+    expect(stored.redGroupName).toBe('Urgent');
+
+    // Restore empty defaults
+    settings.yellowGroupName = '';
+    settings.redGroupName = '';
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+  }, 15_000);
+
+  it('autoGroupEnabled toggle persists independently', async () => {
+    const settings = await h.getSettings();
+    settings.autoGroupEnabled = false;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+
+    const stored = await h.getSettings();
+    expect(stored.autoGroupEnabled).toBe(false);
+    // autoGroupNamingEnabled should be unchanged
+    expect(stored.autoGroupNamingEnabled).toBe(true);
+
+    // Restore
+    settings.autoGroupEnabled = true;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+  }, 15_000);
+
+  it('all v2 settings survive options page reload', async () => {
+    // Set non-default values for all v2 fields
+    const settings = await h.getSettings();
+    settings.agingEnabled = false;
+    settings.tabSortingEnabled = false;
+    settings.greenToYellowEnabled = false;
+    settings.yellowGroupName = 'Test';
+    settings.autoGroupEnabled = false;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
+
+    // Open options page and reload
+    const page = await h.browser.newPage();
+    await page.goto(`chrome-extension://${h.extensionId}/options/options.html`);
+    await sleep(500);
+    await page.reload();
+    await sleep(500);
+
+    // Settings should still be intact after page reload
+    const stored = await h.getSettings();
+    expect(stored.agingEnabled).toBe(false);
+    expect(stored.tabSortingEnabled).toBe(false);
+    expect(stored.greenToYellowEnabled).toBe(false);
+    expect(stored.yellowGroupName).toBe('Test');
+    expect(stored.autoGroupEnabled).toBe(false);
+
+    // Restore defaults
+    settings.agingEnabled = true;
+    settings.tabSortingEnabled = true;
+    settings.greenToYellowEnabled = true;
+    settings.yellowGroupName = '';
+    settings.autoGroupEnabled = true;
+    await h.writeStorage({ v1_settings: settings });
+    await sleep(500);
     await page.close();
   }, 20_000);
 });

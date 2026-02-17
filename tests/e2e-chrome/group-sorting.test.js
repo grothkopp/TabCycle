@@ -162,7 +162,7 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     await h.triggerEvaluation();
 
     const groups = await h.queryGroups(windowId);
-    const yellowSpecial = groups.find((g) => g.title === 'Yellow' && g.color === 'yellow');
+    const yellowSpecial = groups.find((g) => g.title === '' && g.color === 'yellow');
     const greenUserGroup = groups.find((g) => g.title === 'StaysGreen');
 
     expect(yellowSpecial).toBeDefined();
@@ -193,8 +193,8 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
 
     const windowId = (await h.queryTabs({}))[0].windowId;
     const groups = await h.queryGroups(windowId);
-    const yellowSpecial = groups.find((g) => g.title === 'Yellow' && g.color === 'yellow');
-    const redSpecial = groups.find((g) => g.title === 'Red' && g.color === 'red');
+    const yellowSpecial = groups.find((g) => g.title === '' && g.color === 'yellow');
+    const redSpecial = groups.find((g) => g.title === '' && g.color === 'red');
 
     expect(yellowSpecial).toBeDefined();
     expect(redSpecial).toBeDefined();

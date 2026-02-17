@@ -35,6 +35,28 @@ export const DEFAULT_AUTO_GROUP_NAMING = Object.freeze({
 
 export const DEFAULT_SHOW_GROUP_AGE = false;
 
+export const DEFAULT_AGING_TOGGLES = Object.freeze({
+  AGING_ENABLED: true,
+  TAB_SORTING_ENABLED: true,
+  TABGROUP_SORTING_ENABLED: true,
+  TABGROUP_COLORING_ENABLED: true,
+});
+
+export const DEFAULT_TRANSITION_TOGGLES = Object.freeze({
+  GREEN_TO_YELLOW_ENABLED: true,
+  YELLOW_TO_RED_ENABLED: true,
+  RED_TO_GONE_ENABLED: true,
+});
+
+export const DEFAULT_GROUP_NAMES = Object.freeze({
+  YELLOW_GROUP_NAME: '',
+  RED_GROUP_NAME: '',
+});
+
+export const DEFAULT_AUTO_GROUP = Object.freeze({
+  ENABLED: true,
+});
+
 export const BOOKMARK_BLOCKED_URLS = Object.freeze([
   '',
   'chrome://newtab',

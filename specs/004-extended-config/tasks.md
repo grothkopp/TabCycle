@@ -19,10 +19,10 @@
 
 **Purpose**: Extend the settings schema, defaults, and validation. All downstream work depends on these shared definitions being in place.
 
-- [ ] T001 [P] Add new default constants for all new toggle fields in `src/shared/constants.js` — add `DEFAULT_AGING_TOGGLES` (agingEnabled, tabSortingEnabled, tabgroupSortingEnabled, tabgroupColoringEnabled), `DEFAULT_TRANSITION_TOGGLES` (greenToYellowEnabled, yellowToRedEnabled, redToGoneEnabled), `DEFAULT_GROUP_NAMES` (yellowGroupName: '', redGroupName: ''), `DEFAULT_AUTO_GROUP` (autoGroupEnabled: true) per data-model.md field table
-- [ ] T002 [P] Extend `validateSettings()` in `src/shared/schemas.js` — add validation for all 10 new boolean fields (strict true/false), yellowGroupName/redGroupName (string, may be empty), and autoGroupEnabled (boolean) per data-model.md validation rules 1-5
-- [ ] T003 Add v2 default settings object in `src/background/service-worker.js` — update the `defaultSettings` construction (currently ~line 137) to include all new fields from the constants added in T001, ensuring fresh installs get schema v2 defaults
-- [ ] T004 Implement v1→v2 migration logic in `src/background/service-worker.js` — in the `onInstalled` handler, detect `v1_schemaVersion === 1` and merge new fields using nullish coalescing defaults per storage-contract.md migration steps, then set `v1_schemaVersion` to `2`
+- [x] T001 [P] Add new default constants for all new toggle fields in `src/shared/constants.js` — add `DEFAULT_AGING_TOGGLES` (agingEnabled, tabSortingEnabled, tabgroupSortingEnabled, tabgroupColoringEnabled), `DEFAULT_TRANSITION_TOGGLES` (greenToYellowEnabled, yellowToRedEnabled, redToGoneEnabled), `DEFAULT_GROUP_NAMES` (yellowGroupName: '', redGroupName: ''), `DEFAULT_AUTO_GROUP` (autoGroupEnabled: true) per data-model.md field table
+- [x] T002 [P] Extend `validateSettings()` in `src/shared/schemas.js` — add validation for all 10 new boolean fields (strict true/false), yellowGroupName/redGroupName (string, may be empty), and autoGroupEnabled (boolean) per data-model.md validation rules 1-5
+- [x] T003 Add v2 default settings object in `src/background/service-worker.js` — update the `defaultSettings` construction (currently ~line 137) to include all new fields from the constants added in T001, ensuring fresh installs get schema v2 defaults
+- [x] T004 Implement v1→v2 migration logic in `src/background/service-worker.js` — in the `onInstalled` handler, detect `v1_schemaVersion === 1` and merge new fields using nullish coalescing defaults per storage-contract.md migration steps, then set `v1_schemaVersion` to `2`
 
 **Checkpoint**: Schema, defaults, validation, and migration are in place. All settings fields exist in storage for both fresh installs and upgrades.
 
@@ -34,11 +34,11 @@
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T005 Gate `evaluateAllTabs()` on `agingEnabled` in `src/background/service-worker.js` — when `settings.agingEnabled` is false, skip the entire status evaluation loop (tabs freeze in current state). The alarm still fires but evaluation is skipped.
-- [ ] T006 [P] Gate each transition in `computeStatus()` in `src/background/status-evaluator.js` — when `greenToYellowEnabled` is false, cap status at green; when `yellowToRedEnabled` is false, cap at yellow; when `redToGoneEnabled` is false, cap at red. Accept settings object as parameter (or the three booleans).
-- [ ] T007 [P] Gate tab sorting on `tabSortingEnabled` in `src/background/group-manager.js` — when false, skip `moveTabToSpecialGroup()` / special group creation. Gate tabgroup zone-sorting on `tabgroupSortingEnabled`. Gate `updateGroupColor()` on `tabgroupColoringEnabled`. These are three independent boolean checks in existing functions.
-- [ ] T008 [P] Gate auto-grouping on `autoGroupEnabled` in `src/background/tab-placer.js` — when false, skip the entire `placeNewTab()` logic so new tabs open at Chrome's default position without grouping
-- [ ] T009 [P] Gate `showGroupAge` logic on `agingEnabled` in `src/background/service-worker.js` — when `agingEnabled` is false, skip the age-in-title suffix logic even if `showGroupAge` is true (there's no age to show)
+- [x] T005 Gate `evaluateAllTabs()` on `agingEnabled` in `src/background/service-worker.js` — when `settings.agingEnabled` is false, skip the entire status evaluation loop (tabs freeze in current state). The alarm still fires but evaluation is skipped.
+- [x] T006 [P] Gate each transition in `computeStatus()` in `src/background/status-evaluator.js` — when `greenToYellowEnabled` is false, cap status at green; when `yellowToRedEnabled` is false, cap at yellow; when `redToGoneEnabled` is false, cap at red. Accept settings object as parameter (or the three booleans).
+- [x] T007 [P] Gate tab sorting on `tabSortingEnabled` in `src/background/group-manager.js` — when false, skip `moveTabToSpecialGroup()` / special group creation. Gate tabgroup zone-sorting on `tabgroupSortingEnabled`. Gate `updateGroupColor()` on `tabgroupColoringEnabled`. These are three independent boolean checks in existing functions.
+- [x] T008 [P] Gate auto-grouping on `autoGroupEnabled` in `src/background/tab-placer.js` — when false, skip the entire `placeNewTab()` logic so new tabs open at Chrome's default position without grouping
+- [x] T009 [P] Gate `showGroupAge` logic on `agingEnabled` in `src/background/service-worker.js` — when `agingEnabled` is false, skip the age-in-title suffix logic even if `showGroupAge` is true (there's no age to show)
 
 **Checkpoint**: All toggle gates are wired. Disabling any boolean in storage changes runtime behavior on the next evaluation cycle.
 
@@ -52,10 +52,10 @@
 
 ### Implementation for User Story 1
 
-- [ ] T010 [US1] Implement age cap logic in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `agingEnabled` changing from false→true and apply the age cap algorithm from storage-contract.md: compute `capTimestamp = now - (redToGone + 60000)`, then for each tab in tabMeta set `refreshActiveTime = max(refreshActiveTime, capTimestamp)` and `refreshWallTime = max(refreshWallTime, capTimestamp)`
-- [ ] T011 [US1] Implement special group dissolution in `src/background/group-manager.js` — add a `dissolveSpecialGroups(windowId)` function that calls `chrome.tabs.ungroup()` on all tabs in special groups for the given window and clears `windowState.specialGroups.yellow/red`. Export for use by service-worker.
-- [ ] T012 [US1] Wire dissolution reactive behavior in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `tabSortingEnabled` changing from true→false and call `dissolveSpecialGroups()` for all windows immediately (synchronous, not deferred to next cycle)
-- [ ] T013 [US1] Ensure age clock independence — verify in `src/background/time-accumulator.js` that `refreshActiveTime`/`refreshWallTime` timestamps continue accumulating regardless of any settings toggles. No code change expected (age clock is already independent per research.md R3), but confirm by inspection and add a code comment documenting the design decision.
+- [x] T010 [US1] Implement age cap logic in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `agingEnabled` changing from false→true and apply the age cap algorithm from storage-contract.md: compute `capTimestamp = now - (redToGone + 60000)`, then for each tab in tabMeta set `refreshActiveTime = max(refreshActiveTime, capTimestamp)` and `refreshWallTime = max(refreshWallTime, capTimestamp)`
+- [x] T011 [US1] Implement special group dissolution in `src/background/group-manager.js` — add a `dissolveSpecialGroups(windowId)` function that calls `chrome.tabs.ungroup()` on all tabs in special groups for the given window and clears `windowState.specialGroups.yellow/red`. Export for use by service-worker.
+- [x] T012 [US1] Wire dissolution reactive behavior in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `tabSortingEnabled` changing from true→false and call `dissolveSpecialGroups()` for all windows immediately (synchronous, not deferred to next cycle)
+- [x] T013 [US1] Ensure age clock independence — verify in `src/background/time-accumulator.js` that `refreshActiveTime`/`refreshWallTime` timestamps continue accumulating regardless of any settings toggles. No code change expected (age clock is already independent per research.md R3), but confirm by inspection and add a code comment documenting the design decision.
 
 **Checkpoint**: Core aging toggles work. Tab sorting dissolution/recreation works. Age cap prevents mass closure on re-enable. Age clock runs independently. This is the MVP.
 
@@ -69,8 +69,8 @@
 
 ### Implementation for User Story 2
 
-- [ ] T014 [US2] Verify transition gating in `src/background/status-evaluator.js` produces correct status caps — confirm that T006 implementation correctly returns capped status when transitions are disabled. E.g., if `greenToYellowEnabled` is false and a tab is 10 hours old, `computeStatus()` should return 'green' (not 'yellow'). This task verifies the logic end-to-end with the evaluation pipeline.
-- [ ] T015 [US2] Gate bookmarking on cascading transition state in `src/background/service-worker.js` — ensure that when `redToGoneEnabled` is false, the bookmark-and-close logic in the evaluation loop is never reached (tabs cap at red). Also verify that bookmarking respects `bookmarkEnabled` toggle (existing) nested under the red→gone transition.
+- [x] T014 [US2] Verify transition gating in `src/background/status-evaluator.js` produces correct status caps — confirm that T006 implementation correctly returns capped status when transitions are disabled. E.g., if `greenToYellowEnabled` is false and a tab is 10 hours old, `computeStatus()` should return 'green' (not 'yellow'). This task verifies the logic end-to-end with the evaluation pipeline.
+- [x] T015 [US2] Gate bookmarking on cascading transition state in `src/background/service-worker.js` — ensure that when `redToGoneEnabled` is false, the bookmark-and-close logic in the evaluation loop is never reached (tabs cap at red). Also verify that bookmarking respects `bookmarkEnabled` toggle (existing) nested under the red→gone transition.
 
 **Checkpoint**: Individual transition toggles work correctly. Bookmarking is properly gated under red→gone.
 
@@ -84,9 +84,9 @@
 
 ### Implementation for User Story 3
 
-- [ ] T016 [US3] Modify `GROUP_CONFIG` usage in `src/background/group-manager.js` to read titles from settings — replace hardcoded `title: 'Yellow'` / `title: 'Red'` with `settings.yellowGroupName` / `settings.redGroupName` in `ensureSpecialGroup()` and any group creation/update paths. Color remains hardcoded per data-model.md.
-- [ ] T017 [US3] Add `chrome.tabGroups.onUpdated` rename detection listener in `src/background/group-manager.js` — when a special group's title changes and the change was NOT initiated by the extension (use a guard flag like the existing `markExtensionColorUpdate` pattern per research.md R1), persist the new name to settings via `chrome.storage.local.set()`.
-- [ ] T018 [US3] Wire reactive group name update in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `yellowGroupName` or `redGroupName` changes and immediately update existing special group titles via `chrome.tabGroups.update()` (per storage-contract.md reactive behaviors table).
+- [x] T016 [US3] Modify `GROUP_CONFIG` usage in `src/background/group-manager.js` to read titles from settings — replace hardcoded `title: 'Yellow'` / `title: 'Red'` with `settings.yellowGroupName` / `settings.redGroupName` in `ensureSpecialGroup()` and any group creation/update paths. Color remains hardcoded per data-model.md.
+- [x] T017 [US3] Add `chrome.tabGroups.onUpdated` rename detection listener in `src/background/group-manager.js` — when a special group's title changes and the change was NOT initiated by the extension (use a guard flag like the existing `markExtensionColorUpdate` pattern per research.md R1), persist the new name to settings via `chrome.storage.local.set()`.
+- [x] T018 [US3] Wire reactive group name update in `src/background/service-worker.js` — in the `chrome.storage.onChanged` listener, detect `yellowGroupName` or `redGroupName` changes and immediately update existing special group titles via `chrome.tabGroups.update()` (per storage-contract.md reactive behaviors table).
 
 **Checkpoint**: Special group names are configurable, default to empty, and sync bidirectionally (settings ↔ Chrome).
 
@@ -100,9 +100,9 @@
 
 ### Implementation for User Story 4
 
-- [ ] T019 [US4] Rewrite `src/options/options.html` — restructure into two top-level sections per options-page-contract.md wireframe. Section 1 (Aging): master toggle, collapsible details (time mode, tab sorting, tabgroup sorting, tabgroup coloring, age in title), transitions (green→yellow, yellow→red, red→gone each with threshold, toggle, collapsible details for group name/bookmark). Section 2 (Auto-Tab-Groups): two independent toggles (create auto groups, auto-name groups with delay). Use `<details>/<summary>` elements for collapsible sections per research.md R2.
-- [ ] T020 [US4] Rewrite `src/options/options.js` — implement settings load (read `v1_settings`, populate all fields), settings save (collect all field values including disabled ones, validate thresholds, write to storage), grey-out dependency tree (define static hierarchy per data-model.md tree, recursive `effectiveEnabled()` per grey-out rule, apply `disabled` attribute + CSS class synchronously on toggle change per options-page-contract.md), and collapsible section initialization (all collapsed by default). Note: autoGroupEnabled and autoGroupNamingEnabled are independent siblings — no parent-child grey-out between them.
-- [ ] T021 [US4] Rewrite `src/options/options.css` — implement styles per options-page-contract.md CSS classes: `.section`, `.section-header`, `.hierarchy-child`, `.hierarchy-grandchild`, `.disabled-group` (opacity + pointer-events), `.detail-section` (details/summary styling), `.transition-block`. Ensure grey-out response < 100ms (per plan.md performance goals).
+- [x] T019 [US4] Rewrite `src/options/options.html` — restructure into two top-level sections per options-page-contract.md wireframe. Section 1 (Aging): master toggle, collapsible details (time mode, tab sorting, tabgroup sorting, tabgroup coloring, age in title), transitions (green→yellow, yellow→red, red→gone each with threshold, toggle, collapsible details for group name/bookmark). Section 2 (Auto-Tab-Groups): two independent toggles (create auto groups, auto-name groups with delay). Use `<details>/<summary>` elements for collapsible sections per research.md R2.
+- [x] T020 [US4] Rewrite `src/options/options.js` — implement settings load (read `v1_settings`, populate all fields), settings save (collect all field values including disabled ones, validate thresholds, write to storage), grey-out dependency tree (define static hierarchy per data-model.md tree, recursive `effectiveEnabled()` per grey-out rule, apply `disabled` attribute + CSS class synchronously on toggle change per options-page-contract.md), and collapsible section initialization (all collapsed by default). Note: autoGroupEnabled and autoGroupNamingEnabled are independent siblings — no parent-child grey-out between them.
+- [x] T021 [US4] Rewrite `src/options/options.css` — implement styles per options-page-contract.md CSS classes: `.section`, `.section-header`, `.hierarchy-child`, `.hierarchy-grandchild`, `.disabled-group` (opacity + pointer-events), `.detail-section` (details/summary styling), `.transition-block`. Ensure grey-out response < 100ms (per plan.md performance goals).
 
 **Checkpoint**: Settings page is fully restructured, hierarchical grey-out works, collapsible details work, all settings save/load correctly.
 
@@ -116,24 +116,24 @@
 
 ### Unit Tests
 
-- [ ] T022 [P] [US5] Extend `tests/unit/schemas.test.js` — add validation tests for all 10 new boolean fields (must be strict true/false), yellowGroupName/redGroupName (empty string valid, non-string invalid), autoGroupEnabled validation. Test that existing field validation is unchanged.
-- [ ] T023 [P] [US5] Extend `tests/unit/status-evaluator.test.js` — add transition gating tests: greenToYellowEnabled=false caps at green, yellowToRedEnabled=false caps at yellow, redToGoneEnabled=false caps at red. Test all combinations of disabled transitions. Test that enabling all transitions preserves current behavior.
-- [ ] T024 [P] [US5] Extend `tests/unit/group-manager.test.js` — add tests for: tabSortingEnabled=false skips special group creation, tabgroupSortingEnabled=false skips zone-sorting, tabgroupColoringEnabled=false skips color updates, dissolution function ungroups tabs and clears windowState, group titles read from settings (yellowGroupName/redGroupName), rename detection guard flag.
-- [ ] T025 [P] [US5] Extend `tests/unit/tab-placer.test.js` — add test for autoGroupEnabled=false skips placement logic, autoGroupEnabled=true preserves existing behavior.
-- [ ] T026 [P] [US5] Extend `tests/unit/group-sorting.test.js` — add split sorting gate tests: tab sorting off but tabgroup sorting on (groups still zone-sorted, no special groups), both off (no sorting at all), both on (existing behavior).
+- [x] T022 [P] [US5] Extend `tests/unit/schemas.test.js` — add validation tests for all 10 new boolean fields (must be strict true/false), yellowGroupName/redGroupName (empty string valid, non-string invalid), autoGroupEnabled validation. Test that existing field validation is unchanged.
+- [x] T023 [P] [US5] Extend `tests/unit/status-evaluator.test.js` — add transition gating tests: greenToYellowEnabled=false caps at green, yellowToRedEnabled=false caps at yellow, redToGoneEnabled=false caps at red. Test all combinations of disabled transitions. Test that enabling all transitions preserves current behavior.
+- [x] T024 [P] [US5] Extend `tests/unit/group-manager.test.js` — add tests for: tabSortingEnabled=false skips special group creation, tabgroupSortingEnabled=false skips zone-sorting, tabgroupColoringEnabled=false skips color updates, dissolution function ungroups tabs and clears windowState, group titles read from settings (yellowGroupName/redGroupName), rename detection guard flag.
+- [x] T025 [P] [US5] Extend `tests/unit/tab-placer.test.js` — add test for autoGroupEnabled=false skips placement logic, autoGroupEnabled=true preserves existing behavior.
+- [x] T026 [P] [US5] Extend `tests/unit/group-sorting.test.js` — add split sorting gate tests: tab sorting off but tabgroup sorting on (groups still zone-sorted, no special groups), both off (no sorting at all), both on (existing behavior).
 
 ### Integration Tests
 
-- [ ] T027 [P] [US5] Create `tests/integration/settings-migration.test.js` — test v1→v2 migration: v1 settings gain all new fields with correct defaults, existing fields preserved, v1_schemaVersion updated to 2. Test fresh install gets v2 defaults. Test idempotency (running migration on v2 is a no-op).
-- [ ] T028 [P] [US5] Create `tests/integration/toggle-combinations.test.js` — test feature interactions: aging off with sorting configured (no evaluation), transitions partially disabled (correct status caps), tab sorting off but tabgroup sorting on (no special groups but zone-sorting works), age clock continuity when aging toggled off then on (timestamps unchanged), age cap applied correctly on re-enable (tabs capped at redToGone + 1 min), autoGroupEnabled off but autoGroupNamingEnabled on (naming still works independently).
-- [ ] T029 [P] [US5] Extend `tests/integration/storage-persistence.test.js` — add persistence tests for all new fields: save settings with various toggle combinations, reload, verify all values match. Test disabled fields are still persisted.
+- [x] T027 [P] [US5] Create `tests/integration/settings-migration.test.js` — test v1→v2 migration: v1 settings gain all new fields with correct defaults, existing fields preserved, v1_schemaVersion updated to 2. Test fresh install gets v2 defaults. Test idempotency (running migration on v2 is a no-op).
+- [x] T028 [P] [US5] Create `tests/integration/toggle-combinations.test.js` — test feature interactions: aging off with sorting configured (no evaluation), transitions partially disabled (correct status caps), tab sorting off but tabgroup sorting on (no special groups but zone-sorting works), age clock continuity when aging toggled off then on (timestamps unchanged), age cap applied correctly on re-enable (tabs capped at redToGone + 1 min), autoGroupEnabled off but autoGroupNamingEnabled on (naming still works independently).
+- [x] T029 [P] [US5] Extend `tests/integration/storage-persistence.test.js` — add persistence tests for all new fields: save settings with various toggle combinations, reload, verify all values match. Test disabled fields are still persisted.
 
 ### E2E Tests
 
-- [ ] T030 [US5] Create `tests/e2e-chrome/feature-toggles.test.js` — E2E Puppeteer tests: load extension in Chrome, toggle aging off (verify no status transitions), toggle tab sorting off (verify special groups dissolved), toggle tabgroup coloring off (verify group colors unchanged), toggle autoGroupEnabled off (verify new tabs not grouped), toggle autoGroupNamingEnabled off separately (verify naming stops but grouping unaffected).
-- [ ] T031 [US5] Create `tests/e2e-chrome/age-cap-dissolution.test.js` — E2E Puppeteer tests: disable aging, wait, re-enable (verify age cap applied, no mass closure), disable tab sorting (verify dissolution happens immediately), re-enable tab sorting (verify tabs regrouped on next cycle).
-- [ ] T032 [US5] Extend `tests/e2e-chrome/settings-persistence.test.js` — add E2E tests for new fields: save all new settings via options page, restart extension, verify all values persisted. Test migration from v1 schema.
-- [ ] T033 [US5] Extend `tests/e2e/settings-change.test.js` — add options page UI tests: verify two-section layout, verify hierarchical grey-out (disable aging → all children greyed), verify collapsible details (collapsed by default, expand on click), verify independent auto-group/auto-naming toggles (disable one, other stays active), verify threshold validation on enabled transitions only.
+- [x] T030 [US5] Create `tests/e2e-chrome/feature-toggles.test.js` — E2E Puppeteer tests: load extension in Chrome, toggle aging off (verify no status transitions), toggle tab sorting off (verify special groups dissolved), toggle tabgroup coloring off (verify group colors unchanged), toggle autoGroupEnabled off (verify new tabs not grouped), toggle autoGroupNamingEnabled off separately (verify naming stops but grouping unaffected).
+- [x] T031 [US5] Create `tests/e2e-chrome/age-cap-dissolution.test.js` — E2E Puppeteer tests: disable aging, wait, re-enable (verify age cap applied, no mass closure), disable tab sorting (verify dissolution happens immediately), re-enable tab sorting (verify tabs regrouped on next cycle).
+- [x] T032 [US5] Extend `tests/e2e-chrome/settings-persistence.test.js` — add E2E tests for new fields: save all new settings via options page, restart extension, verify all values persisted. Test migration from v1 schema.
+- [x] T033 [US5] Extend `tests/e2e/settings-change.test.js` — add options page UI tests: verify two-section layout, verify hierarchical grey-out (disable aging → all children greyed), verify collapsible details (collapsed by default, expand on click), verify independent auto-group/auto-naming toggles (disable one, other stays active), verify threshold validation on enabled transitions only.
 
 **Checkpoint**: Full test coverage. `npm test` passes. All acceptance criteria from spec.md SC-001 through SC-011 are verified.
 
@@ -143,9 +143,9 @@
 
 **Purpose**: Final validation, documentation, and cleanup across all user stories.
 
-- [ ] T034 [P] Verify no regressions — run `npm test && npm run lint` and confirm all existing tests still pass with zero failures
-- [ ] T035 [P] Add structured log lines for reactive behaviors in `src/background/service-worker.js` — log when age cap is applied (number of tabs capped), when special groups are dissolved (window IDs), when group names are updated reactively. Use existing logger.js patterns per plan.md constitution check.
-- [ ] T036 Run quickstart.md validation — walk through quickstart.md implementation order and verify all 18 listed files have been modified as specified. Confirm no files were missed.
+- [x] T034 [P] Verify no regressions — run `npm test && npm run lint` and confirm all existing tests still pass with zero failures
+- [x] T035 [P] Add structured log lines for reactive behaviors in `src/background/service-worker.js` — log when age cap is applied (number of tabs capped), when special groups are dissolved (window IDs), when group names are updated reactively. Use existing logger.js patterns per plan.md constitution check.
+- [x] T036 Run quickstart.md validation — walk through quickstart.md implementation order and verify all 18 listed files have been modified as specified. Confirm no files were missed.
 
 ---
 

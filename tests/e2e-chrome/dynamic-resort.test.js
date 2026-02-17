@@ -62,7 +62,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       let tab = await h.getTab(tabId);
       expect(tab.groupId).not.toBe(-1);
       let group = await h.getGroup(tab.groupId);
-      expect(group.title).toBe('Yellow');
+      expect(group.title).toBe('');
 
       // Raise threshold so tab is now green again
       await h.setFastThresholds({
@@ -104,7 +104,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       let tab = await h.getTab(tabId);
       expect(tab.groupId).not.toBe(-1);
       let group = await h.getGroup(tab.groupId);
-      expect(group.title).toBe('Yellow');
+      expect(group.title).toBe('');
 
       // Lower yellowToRed threshold so tab is now red
       await h.setFastThresholds({
@@ -121,7 +121,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       tab = await h.getTab(tabId);
       expect(tab.groupId).not.toBe(-1);
       group = await h.getGroup(tab.groupId);
-      expect(group.title).toBe('Red');
+      expect(group.title).toBe('');
 
       await h.closeTab(tabId);
     }, 30_000);

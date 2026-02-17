@@ -17,7 +17,14 @@ const logger = createLogger('background');
  *   2. Context tab is ungrouped & unpinned → group both into a new tab group (color = green)
  *   3. All other cases (pinned, special-group, no context tab) → leftmost position
  */
-export async function placeNewTab(newTab, windowId, tabMeta, windowState) {
+export async function placeNewTab(newTab, windowId, tabMeta, windowState, settings) {
+  // When auto-grouping is disabled, skip the entire placement logic.
+  // New tabs open at Chrome's default position without being grouped.
+  if (settings?.autoGroupEnabled === false) {
+    logger.debug('Auto-grouping disabled, skipping tab placement', { newTabId: newTab.id, windowId });
+    return;
+  }
+
   try {
     // Find the context tab — the tab that was active before this new tab was created
     let contextTab = null;

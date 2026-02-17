@@ -89,10 +89,24 @@ function scheduleDissolution(groupId, tabId, windowId) {
   }
 }
 
+// Colors are identity-based and remain hardcoded. Titles come from settings.
 const GROUP_CONFIG = {
-  [SPECIAL_GROUP_TYPES.YELLOW]: { title: 'Yellow', color: 'yellow' },
-  [SPECIAL_GROUP_TYPES.RED]: { title: 'Red', color: 'red' },
+  [SPECIAL_GROUP_TYPES.YELLOW]: { color: 'yellow' },
+  [SPECIAL_GROUP_TYPES.RED]: { color: 'red' },
 };
+
+/**
+ * Get the title for a special group type from settings, falling back to empty string.
+ */
+function getSpecialGroupTitle(type, settings) {
+  if (type === SPECIAL_GROUP_TYPES.YELLOW) {
+    return settings?.yellowGroupName ?? '';
+  }
+  if (type === SPECIAL_GROUP_TYPES.RED) {
+    return settings?.redGroupName ?? '';
+  }
+  return '';
+}
 
 export function isSpecialGroup(groupId, windowId, windowState) {
   if (groupId === null || groupId === undefined) return false;
@@ -210,7 +224,7 @@ export function consumeExpectedExtensionColorUpdate(groupId, color, nowMs = Date
   return true;
 }
 
-export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCreation) {
+export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCreation, settings) {
   const ws = ensureWindowState(windowId, windowState);
   const existingGroupId = ws.specialGroups[type];
 
@@ -232,9 +246,10 @@ export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCr
 
   try {
     const config = GROUP_CONFIG[type];
+    const title = getSpecialGroupTitle(type, settings);
     const groupId = await chrome.tabs.group({ tabIds: [tabIdForCreation], createProperties: { windowId } });
     await chrome.tabGroups.update(groupId, {
-      title: config.title,
+      title,
       color: config.color,
       collapsed: false,
     });
@@ -273,9 +288,9 @@ export async function removeSpecialGroupIfEmpty(windowId, type, windowState) {
   }
 }
 
-export async function moveTabToSpecialGroup(tabId, type, windowId, windowState) {
+export async function moveTabToSpecialGroup(tabId, type, windowId, windowState, settings) {
   const ws = ensureWindowState(windowId, windowState);
-  const ensured = await ensureSpecialGroup(windowId, type, windowState, tabId);
+  const ensured = await ensureSpecialGroup(windowId, type, windowState, tabId, settings);
   let groupId = ensured.groupId;
 
   if (groupId === null) {
@@ -300,7 +315,7 @@ export async function moveTabToSpecialGroup(tabId, type, windowId, windowState) 
     // Group may have been deleted between validation and move.
     if (err?.message?.includes('No group with id')) {
       ws.specialGroups[type] = null;
-      const retry = await ensureSpecialGroup(windowId, type, windowState, tabId);
+      const retry = await ensureSpecialGroup(windowId, type, windowState, tabId, settings);
       groupId = retry.groupId;
       if (groupId !== null) {
         if (retry.created) return { success: true, groupId };
@@ -423,9 +438,14 @@ const ZONE_RANK = { green: 0, yellow: 1, red: 2 };
  * @param {function} goneConfig.bookmarkGroupTabs - async (title, tabs, folderId) => result
  * @param {function} goneConfig.isBookmarkableUrl - (url) => boolean
  */
-export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConfig) {
+export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConfig, settings) {
   const ws = ensureWindowState(windowId, windowState);
   const result = { tabsMoved: 0, groupsMoved: 0, goneTabsClosed: 0, goneGroupsClosed: 0 };
+
+  // Resolve toggle settings (default true for backward compatibility)
+  const tabSortingEnabled = settings?.tabSortingEnabled !== false;
+  const tabgroupSortingEnabled = settings?.tabgroupSortingEnabled !== false;
+  const tabgroupColoringEnabled = settings?.tabgroupColoringEnabled !== false;
 
   try {
     // ── 1. Read current browser state ──────────────────────────────────
@@ -476,6 +496,7 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       const desiredZone = meta.status; // green, yellow, red, or gone
 
       // ── Gone ungrouped/special-group tabs: bookmark + close ──────────
+      // Gone handling always runs regardless of tabSortingEnabled
       if (desiredZone === STATUS.GONE) {
         if (goneConfig) {
           if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
@@ -501,13 +522,16 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
         continue;
       }
 
+      // When tab sorting is disabled, skip moving tabs to/from special groups
+      if (!tabSortingEnabled) continue;
+
       // If status matches zone → don't sort it
       if (currentZone === desiredZone) continue;
 
       // Status differs from zone → move according to rules
       if (desiredZone === 'yellow') {
         // Move to yellow special group
-        const moveResult = await moveTabToSpecialGroup(ct.id, 'yellow', windowId, windowState);
+        const moveResult = await moveTabToSpecialGroup(ct.id, 'yellow', windowId, windowState, settings);
         if (moveResult.success) {
           meta.groupId = moveResult.groupId;
           meta.isSpecialGroup = true;
@@ -517,7 +541,7 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
         }
       } else if (desiredZone === 'red') {
         // Move to red special group (from yellow special or ungrouped)
-        const moveResult = await moveTabToSpecialGroup(ct.id, 'red', windowId, windowState);
+        const moveResult = await moveTabToSpecialGroup(ct.id, 'red', windowId, windowState, settings);
         if (moveResult.success) {
           meta.groupId = moveResult.groupId;
           meta.isSpecialGroup = true;
@@ -541,7 +565,9 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       await removeSpecialGroupIfEmpty(windowId, 'red', windowState);
     }
 
-    // ── 3. Sort groups ─────────────────────────────────────────────────
+    // ── 3. Sort groups (gated on tabgroupSortingEnabled) ────────────────
+    // When tabgroup sorting is disabled, we still compute group statuses
+    // (needed for color updates and gone handling) but skip reordering.
     // Re-read tabs/groups after tab moves may have created/emptied groups.
     // tabGroups.query is creation-ordered, so we need tab indices to recover
     // visual group order.
@@ -736,7 +762,8 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       needsMove: currentIds.join(',') !== desiredIds.join(','),
     });
 
-    if (currentIds.join(',') !== desiredIds.join(',')) {
+    // Only reorder groups when tabgroup sorting is enabled
+    if (tabgroupSortingEnabled && currentIds.join(',') !== desiredIds.join(',')) {
       for (const g of desired) {
         try {
           await chrome.tabGroups.move(g.id, { index: -1 });
@@ -750,11 +777,13 @@ export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConf
       }
     }
 
-    // Update colors for user groups only (never touch special group colors)
-    for (const g of ordered) {
-      const status = statusMap.get(g.id);
-      if (status) {
-        await updateGroupColor(g.id, status);
+    // Update colors for user groups only when tabgroup coloring is enabled
+    if (tabgroupColoringEnabled) {
+      for (const g of ordered) {
+        const status = statusMap.get(g.id);
+        if (status) {
+          await updateGroupColor(g.id, status);
+        }
       }
     }
 
@@ -1166,4 +1195,36 @@ export async function ungroupTab(tabId) {
     logger.warn('Failed to ungroup tab', { tabId, error: err.message });
     return false;
   }
+}
+
+/**
+ * Dissolve special groups in a window: ungroup all tabs and clear references.
+ * Used when tabSortingEnabled is turned off.
+ * Tabs stay in place — only the group wrapper is removed.
+ */
+export async function dissolveSpecialGroups(windowId, windowState) {
+  const ws = windowState[windowId] || windowState[String(windowId)];
+  if (!ws) return { dissolved: 0 };
+
+  let dissolved = 0;
+
+  for (const type of ['yellow', 'red']) {
+    const groupId = ws.specialGroups[type];
+    if (groupId === null) continue;
+
+    try {
+      const tabs = await chrome.tabs.query({ groupId });
+      for (const tab of tabs) {
+        await ungroupTab(tab.id);
+      }
+      dissolved++;
+      logger.debug('Dissolved special group', { windowId, type, groupId, tabCount: tabs.length });
+    } catch (err) {
+      logger.warn('Failed to dissolve special group', { windowId, type, groupId, error: err.message });
+    }
+
+    ws.specialGroups[type] = null;
+  }
+
+  return { dissolved };
 }

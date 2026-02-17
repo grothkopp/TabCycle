@@ -45,7 +45,7 @@ Adds granular configuration to every aspect of the TabCycle extension. Users can
 12. **`tests/unit/group-manager.test.js`** — Test sorting/coloring gates, dissolution
 13. **`tests/unit/tab-placer.test.js`** — Test autogroup gating
 14. **`tests/integration/settings-migration.test.js`** — New: v1→v2 migration
-15. **`tests/integration/settings-toggle-combinations.test.js`** — New: feature interactions
+15. **`tests/integration/toggle-combinations.test.js`** — New: feature interactions
 16. **`tests/e2e-chrome/feature-toggles.test.js`** — New: full E2E for toggle behaviors
 17. **`tests/e2e-chrome/settings-persistence.test.js`** — Extend for new fields
 18. **`tests/e2e/settings-change.test.js`** — Extend for new settings page UI
