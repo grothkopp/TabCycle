@@ -143,18 +143,6 @@ describeOrSkip('Browser restart (session restore)', () => {
       await sleep(500);
     }
 
-    // Diagnostic: dump reconciliation debug info
-    const debugStorage = await h2.readStorage(['__debugReconcile']);
-    console.log('RECONCILE DEBUG:', JSON.stringify(debugStorage.__debugReconcile, null, 2));
-
-    // Diagnostic: dump tabMeta URLs and refreshWallTimes to see if URL matching worked
-    const debugMeta = await h2.getTabMeta();
-    const debugEntries = Object.values(debugMeta).map((m) => ({
-      url: m.url, status: m.status,
-      wallAge: Date.now() - m.refreshWallTime,
-    }));
-    console.log('POST-RESTART tabMeta:', JSON.stringify(debugEntries, null, 2));
-
     // Run an evaluation cycle to settle all state (special groups, colors, sorting)
     await h2.triggerEvaluation();
 

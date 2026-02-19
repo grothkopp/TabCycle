@@ -42,10 +42,13 @@ const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 // Guard: suppress onUpdated groupId handler while placeNewTab is running
 let tabPlacementRunning = false;
 
-// Guard: suppress placeNewTab during browser startup to avoid
-// interfering with Chrome's session-restore group assignments.
+// Guard: suppress placeNewTab and navigation events during browser startup
+// to avoid interfering with Chrome's session-restore group assignments.
 // Chrome fires onCreated for restored tabs before groupId is set,
 // so auto-placement would see them as ungrouped and disrupt groups.
+// Uses a counter because both onInstalled and onStartup may run concurrently;
+// the flag stays true until ALL startup handlers have completed.
+let _startupRefCount = 0;
 let startupInProgress = false;
 let reconcilePromise = null; // mutex: only one reconcileState at a time
 const navigationMutationTabs = new Set(); // tabIds being mutated by navigation reset flow
@@ -158,7 +161,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       isFalseInstall = storedTabCount > 0;
 
       if (isFalseInstall) {
-        startupInProgress = true;
+        _startupRefCount++; startupInProgress = _startupRefCount > 0;
         logger.info('Existing tab data found on install — treating as reconciliation', {
           existingTabCount: storedTabCount,
         }, cid);
@@ -250,8 +253,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     logger.error('onInstalled handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, cid);
   } finally {
     if (isFalseInstall) {
-      startupInProgress = false;
-      logger.info('Startup guard cleared (false install)', null, cid);
+      _startupRefCount--; startupInProgress = _startupRefCount > 0;
+      logger.info('Startup guard cleared (false install)', { refCount: _startupRefCount }, cid);
     }
   }
 });
@@ -259,7 +262,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 // ─── Browser Startup ─────────────────────────────────────────────────────────
 
 chrome.runtime.onStartup.addListener(async () => {
-  startupInProgress = true;
+  _startupRefCount++; startupInProgress = _startupRefCount > 0;
   const cid = logger.correlationId();
   logger.info('Browser startup detected', null, cid);
 
@@ -278,8 +281,8 @@ chrome.runtime.onStartup.addListener(async () => {
   } catch (err) {
     logger.error('onStartup handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_RECOVERY }, cid);
   } finally {
-    startupInProgress = false;
-    logger.info('Startup guard cleared', null, cid);
+    _startupRefCount--; startupInProgress = _startupRefCount > 0;
+    logger.info('Startup guard cleared', { refCount: _startupRefCount }, cid);
   }
 });
 
@@ -694,6 +697,15 @@ async function _handleNavigationEvent(tabId, source) {
       logger.debug('Navigation for untracked tab, skipping', { tabId, source }, cid);
       return;
     }
+
+    // Suppress session-restore "navigations": when Chrome lazily loads a
+    // previously frozen tab the URL matches what we already have stored.
+    // This is not a user-initiated navigation and must not reset the age.
+    if (navUrl && existing.url && navUrl === existing.url) {
+      logger.debug('Navigation URL matches stored URL, suppressing age reset', { tabId, source, url: navUrl }, cid);
+      return;
+    }
+
     const currentActiveTime = await getCurrentActiveTime();
     const updated = handleNavigation(existing, currentActiveTime, navUrl);
     tabMeta[tabId] = updated;
@@ -1168,35 +1180,15 @@ async function reconcileStateImpl(cid) {
     if (storedUrlCount > 0) {
       // Poll until Chrome tabs have real URLs (session restore loads lazily)
       const deadline = Date.now() + 10_000;
-      let pollCount = 0;
       while (Date.now() < deadline) {
         [chromeTabs, chromeWindows] = await Promise.all([
           chrome.tabs.query({}),
           chrome.windows.getAll(),
         ]);
-        const realUrlTabs = chromeTabs.filter(
+        const realUrlCount = chromeTabs.filter(
           (t) => !t.pinned && isMatchableUrl(t.url),
-        );
-        pollCount++;
-        if (realUrlTabs.length >= storedUrlCount) {
-          logger.info('URL readiness poll complete', {
-            pollCount,
-            storedUrlCount,
-            realUrlCount: realUrlTabs.length,
-            totalTabs: chromeTabs.length,
-            tabUrls: chromeTabs.map((t) => t.url),
-          }, cid);
-          break;
-        }
-        if (pollCount <= 3 || pollCount % 10 === 0) {
-          logger.debug('URL readiness poll waiting', {
-            pollCount,
-            storedUrlCount,
-            realUrlCount: realUrlTabs.length,
-            totalTabs: chromeTabs.length,
-            tabUrls: chromeTabs.map((t) => t.url),
-          }, cid);
-        }
+        ).length;
+        if (realUrlCount >= storedUrlCount) break;
         await new Promise((r) => setTimeout(r, 300));
       }
     } else {
@@ -1319,11 +1311,40 @@ async function reconcileStateImpl(cid) {
       }, cid);
     }
 
+    // Build old→new window ID mapping from tab metadata.
+    // After a restart Chrome assigns new window IDs, so stored window state
+    // entries reference stale IDs.  We use tab windowId to recover the mapping.
+    const windowIdMap = new Map();
+    for (const meta of Object.values(reconciledMeta)) {
+      const storedWid = Object.values(storedTabMeta).find(
+        (m) => m.url && m.url === meta.url && m.url !== 'about:blank',
+      )?.windowId;
+      if (storedWid !== undefined && storedWid !== meta.windowId) {
+        const votes = windowIdMap.get(storedWid) || new Map();
+        votes.set(meta.windowId, (votes.get(meta.windowId) || 0) + 1);
+        windowIdMap.set(storedWid, votes);
+      }
+    }
+    // Resolve to best mapping
+    const resolvedWindowMap = new Map();
+    for (const [oldWid, newWidCounts] of windowIdMap) {
+      let bestNewWid = null;
+      let bestCount = 0;
+      for (const [newWid, count] of newWidCounts) {
+        if (count > bestCount) { bestCount = count; bestNewWid = newWid; }
+      }
+      if (bestNewWid !== null) resolvedWindowMap.set(oldWid, bestNewWid);
+    }
+
     const reconciledWindowState = {};
-    // Keep existing window state for windows still open
+    // Keep existing window state for windows still open (or mapped to new ID)
     for (const [wid, ws] of Object.entries(storedWindowState)) {
-      if (chromeWindowIds.has(Number(wid))) {
-        const liveGroupIds = liveGroupIdsByWindow.get(Number(wid)) || new Set();
+      const numWid = Number(wid);
+      const resolvedWid = chromeWindowIds.has(numWid)
+        ? numWid
+        : (resolvedWindowMap.get(numWid) ?? null);
+      if (resolvedWid !== null && chromeWindowIds.has(resolvedWid)) {
+        const liveGroupIds = liveGroupIdsByWindow.get(resolvedWid) || new Set();
         const currentState = ws && typeof ws === 'object' ? ws : {};
         const storedSpecialGroups = currentState.specialGroups && typeof currentState.specialGroups === 'object'
           ? currentState.specialGroups
@@ -1380,7 +1401,7 @@ async function reconcileStateImpl(cid) {
           }
         }
 
-        reconciledWindowState[wid] = {
+        reconciledWindowState[resolvedWid] = {
           specialGroups,
           groupZones,
           groupNaming,
@@ -1398,24 +1419,9 @@ async function reconcileStateImpl(cid) {
       }
     }
 
-    // Debug: store reconciliation details for test visibility
-    const _debugReconcile = {
-      storedUrlCount,
-      urlMatches,
-      idMatches: Object.values(reconciledMeta).filter((m) =>
-        storedTabMeta[m.tabId] || storedTabMeta[String(m.tabId)],
-      ).length,
-      freshEntries: Object.values(reconciledMeta).filter((m) =>
-        m.refreshWallTime >= now - 2000,
-      ).map((m) => ({ url: m.url, tabId: m.tabId })),
-      chromeTabUrls: chromeTabs.map((t) => ({ id: t.id, url: t.url, pinned: t.pinned })),
-      storedUrls: Object.values(storedTabMeta).map((m) => ({ tabId: m.tabId, url: m.url })),
-    };
-
     await batchWrite({
       [STORAGE_KEYS.TAB_META]: reconciledMeta,
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
-      __debugReconcile: _debugReconcile,
     });
 
     logger.info('State reconciled', {
