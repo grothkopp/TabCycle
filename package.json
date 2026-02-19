@@ -1,6 +1,6 @@
 {
   "name": "tabcycle",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Chrome extension to manage the lifecycle of opened tabs",
   "private": true,
   "type": "module",

@@ -1,0 +1,74 @@
+name: Release Please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-and-publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          VERSION="${{ needs.release-please.outputs.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version: $VERSION"
+
+      - name: Build extension zip
+        run: |
+          mkdir -p dist
+          cd src && zip -r ../dist/tabcycle-v${{ steps.version.outputs.version }}.zip . -x '*.DS_Store'
+
+      - name: Build extension crx
+        run: |
+          openssl genrsa 2048 > dist/key.pem 2>/dev/null
+          npx crx3 src \
+            --keyPath dist/key.pem \
+            --crxPath "dist/tabcycle-v${{ steps.version.outputs.version }}.crx" \
+            --zipPath /dev/null
+          rm -f dist/key.pem
+
+      - name: Upload assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: |
+            dist/tabcycle-v${{ steps.version.outputs.version }}.zip
+            dist/tabcycle-v${{ steps.version.outputs.version }}.crx

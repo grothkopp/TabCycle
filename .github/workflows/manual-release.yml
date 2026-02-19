@@ -1,0 +1,68 @@
+name: Manual Release (Emergency)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g., 0.4.1)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check tag does not already exist
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists."
+            exit 1
+          fi
+
+      - name: Build extension zip
+        run: |
+          mkdir -p dist
+          cd src && zip -r ../dist/tabcycle-v${{ inputs.version }}.zip . -x '*.DS_Store'
+
+      - name: Build extension crx
+        run: |
+          openssl genrsa 2048 > dist/key.pem 2>/dev/null
+          npx crx3 src \
+            --keyPath dist/key.pem \
+            --crxPath "dist/tabcycle-v${{ inputs.version }}.crx" \
+            --zipPath /dev/null
+          rm -f dist/key.pem
+
+      - name: Create git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "Manual Release v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: TabCycle v${{ inputs.version }}
+          body: "Manual emergency release v${{ inputs.version }}"
+          files: |
+            dist/tabcycle-v${{ inputs.version }}.zip
+            dist/tabcycle-v${{ inputs.version }}.crx
