@@ -16,7 +16,7 @@ jobs:
           - name: shard-1
             pattern: 'status-transitions|tab-grouping|group-sorting'
           - name: shard-2
-            pattern: 'navigation-reset|tab-placement|gone-and-bookmarks'
+            pattern: 'navigation-reset|tab-placement|gone-and-bookmarks|browser-restart'
           - name: shard-3
             pattern: 'settings-persistence|group-dissolution|edge-cases|dynamic-resort|auto-group-naming'
 
