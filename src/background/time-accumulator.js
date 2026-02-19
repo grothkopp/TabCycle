@@ -1,4 +1,4 @@
-import { STORAGE_KEYS, ERROR_CODES } from '../shared/constants.js';
+import { STORAGE_KEYS } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
 

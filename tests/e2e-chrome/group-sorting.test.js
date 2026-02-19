@@ -6,7 +6,7 @@
  * user groups are colored to match their freshest tab's status.
  */
 
-import { createHarness, sleep } from './harness.js';
+import { createHarness } from './harness.js';
 
 const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
@@ -106,9 +106,9 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
 
     const windowId = (await h.getTab(greenTabs[0])).windowId;
 
-    const greenGroup = await h.createUserGroup(greenTabs, 'GreenGroup', windowId);
-    const yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGroup', windowId);
-    const redGroup = await h.createUserGroup(redTabs, 'RedGroup', windowId);
+    const _greenGroup = await h.createUserGroup(greenTabs, 'GreenGroup', windowId);
+    const _yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGroup', windowId);
+    const _redGroup = await h.createUserGroup(redTabs, 'RedGroup', windowId);
 
     // Backdate tabs with wide margins:
     // green: fresh (0ms) — well under 15s threshold
@@ -155,7 +155,7 @@ describeOrSkip('Group Sorting & Zone Order (real Chrome)', () => {
     // Also create a green user group for reference
     const greenTabs = await h.openTabs(2, 'https://example.com');
     const windowId = (await h.getTab(tabId)).windowId;
-    const greenGroup = await h.createUserGroup(greenTabs, 'StaysGreen', windowId);
+    const _greenGroup = await h.createUserGroup(greenTabs, 'StaysGreen', windowId);
 
     // Backdate the ungrouped tab to yellow
     await h.backdateTab(tabId, 2500);

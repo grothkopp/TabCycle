@@ -260,7 +260,7 @@ describeOrSkip('Tab Placement (real Chrome)', () => {
     // Create some yellow tabs so there's a non-green zone to avoid
     const [yTab1, yTab2] = await h.openTabs(2, 'https://example.com');
     const windowId = (await h.getTab(yTab1)).windowId;
-    const yellowGroup = await h.createUserGroup([yTab1, yTab2], 'YellowGroup', windowId);
+    const _yellowGroup = await h.createUserGroup([yTab1, yTab2], 'YellowGroup', windowId);
     await h.backdateTab(yTab1, 3000);
     await h.backdateTab(yTab2, 3000);
     await h.triggerEvaluation();

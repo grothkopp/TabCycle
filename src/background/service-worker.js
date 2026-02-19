@@ -1,7 +1,7 @@
 import { STORAGE_KEYS, ALARM_NAME, ALARM_PERIOD_MINUTES, DEFAULT_THRESHOLDS, DEFAULT_BOOKMARK_SETTINGS, DEFAULT_AUTO_GROUP_NAMING, DEFAULT_SHOW_GROUP_AGE, DEFAULT_AGING_TOGGLES, DEFAULT_TRANSITION_TOGGLES, DEFAULT_GROUP_NAMES, DEFAULT_AUTO_GROUP, TIME_MODE, STATUS, ERROR_CODES, SPECIAL_GROUP_TYPES } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
 import { readState, batchWrite } from './state-persistence.js';
-import { createTabEntry, handleNavigation, reconcileTabs } from './tab-tracker.js';
+import { createTabEntry, handleNavigation } from './tab-tracker.js';
 import { evaluateAllTabs } from './status-evaluator.js';
 import {
   isSpecialGroup,
@@ -41,6 +41,13 @@ const EVALUATION_CYCLE_TIMEOUT_MS = 60_000; // auto-reset guard after 60s
 
 // Guard: suppress onUpdated groupId handler while placeNewTab is running
 let tabPlacementRunning = false;
+
+// Guard: suppress placeNewTab during browser startup to avoid
+// interfering with Chrome's session-restore group assignments.
+// Chrome fires onCreated for restored tabs before groupId is set,
+// so auto-placement would see them as ungrouped and disrupt groups.
+let startupInProgress = false;
+let reconcilePromise = null; // mutex: only one reconcileState at a time
 const navigationMutationTabs = new Set(); // tabIds being mutated by navigation reset flow
 
 // ─── Debounced Sort & Title Update ───────────────────────────────────────────
@@ -139,47 +146,63 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const cid = logger.correlationId();
   logger.info('Extension installed/updated', { reason: details.reason }, cid);
 
+  // Check if storage already has tab data — used to detect false "install"
+  // events (unpacked extension reload on an existing profile).
+  let isFalseInstall = false;
+  let storedTabCount;
   try {
     if (details.reason === 'install') {
-      const defaultSettings = {
-        timeMode: TIME_MODE.ACTIVE,
-        thresholds: {
-          greenToYellow: DEFAULT_THRESHOLDS.GREEN_TO_YELLOW,
-          yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
-          redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
-        },
-        // v2 aging toggles
-        agingEnabled: DEFAULT_AGING_TOGGLES.AGING_ENABLED,
-        tabSortingEnabled: DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
-        tabgroupSortingEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
-        tabgroupColoringEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
-        showGroupAge: DEFAULT_SHOW_GROUP_AGE,
-        // v2 transition toggles
-        greenToYellowEnabled: DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
-        yellowToRedEnabled: DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
-        redToGoneEnabled: DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
-        // v2 group names
-        yellowGroupName: DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
-        redGroupName: DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
-        // Bookmark settings
-        bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
-        bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
-        // Auto-group settings (independent of aging)
-        autoGroupEnabled: DEFAULT_AUTO_GROUP.ENABLED,
-        autoGroupNamingEnabled: DEFAULT_AUTO_GROUP_NAMING.ENABLED,
-        autoGroupNamingDelayMinutes: DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES,
-      };
+      const existing = await readState([STORAGE_KEYS.TAB_META]);
+      const existingMeta = existing[STORAGE_KEYS.TAB_META];
+      storedTabCount = existingMeta ? Object.keys(existingMeta).length : 0;
+      isFalseInstall = storedTabCount > 0;
 
-      await batchWrite({
-        [STORAGE_KEYS.SCHEMA_VERSION]: 2,
-        [STORAGE_KEYS.SETTINGS]: defaultSettings,
-        [STORAGE_KEYS.TAB_META]: {},
-        [STORAGE_KEYS.WINDOW_STATE]: {},
-        [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: null },
-      });
+      if (isFalseInstall) {
+        startupInProgress = true;
+        logger.info('Existing tab data found on install — treating as reconciliation', {
+          existingTabCount: storedTabCount,
+        }, cid);
+      } else {
+        const defaultSettings = {
+          timeMode: TIME_MODE.ACTIVE,
+          thresholds: {
+            greenToYellow: DEFAULT_THRESHOLDS.GREEN_TO_YELLOW,
+            yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
+            redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
+          },
+          // v2 aging toggles
+          agingEnabled: DEFAULT_AGING_TOGGLES.AGING_ENABLED,
+          tabSortingEnabled: DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
+          tabgroupSortingEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
+          tabgroupColoringEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
+          showGroupAge: DEFAULT_SHOW_GROUP_AGE,
+          // v2 transition toggles
+          greenToYellowEnabled: DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
+          yellowToRedEnabled: DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
+          redToGoneEnabled: DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
+          // v2 group names
+          yellowGroupName: DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
+          redGroupName: DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
+          // Bookmark settings
+          bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
+          bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
+          // Auto-group settings (independent of aging)
+          autoGroupEnabled: DEFAULT_AUTO_GROUP.ENABLED,
+          autoGroupNamingEnabled: DEFAULT_AUTO_GROUP_NAMING.ENABLED,
+          autoGroupNamingDelayMinutes: DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES,
+        };
 
-      await initActiveTime();
-      logger.info('Storage initialized with defaults', null, cid);
+        await batchWrite({
+          [STORAGE_KEYS.SCHEMA_VERSION]: 2,
+          [STORAGE_KEYS.SETTINGS]: defaultSettings,
+          [STORAGE_KEYS.TAB_META]: {},
+          [STORAGE_KEYS.WINDOW_STATE]: {},
+          [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: null },
+        });
+
+        await initActiveTime();
+        logger.info('Storage initialized with defaults', null, cid);
+      }
     }
 
     // v1 → v2 migration: add new fields with defaults, preserve existing fields
@@ -212,7 +235,11 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await chrome.alarms.create(ALARM_NAME, { periodInMinutes: ALARM_PERIOD_MINUTES });
     logger.info('Alarm created', { name: ALARM_NAME, periodMinutes: ALARM_PERIOD_MINUTES }, cid);
 
-    if (details.reason === 'install') {
+    if (details.reason === 'install' && isFalseInstall) {
+      // False "install" — unpacked extension reloaded on an existing profile.
+      // reconcileState now handles waiting for tab URLs internally.
+      await reconcileState(cid);
+    } else if (details.reason === 'install') {
       await scanExistingTabs(cid);
     } else {
       await reconcileState(cid);
@@ -221,12 +248,18 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await runEvaluationCycle(cid);
   } catch (err) {
     logger.error('onInstalled handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, cid);
+  } finally {
+    if (isFalseInstall) {
+      startupInProgress = false;
+      logger.info('Startup guard cleared (false install)', null, cid);
+    }
   }
 });
 
 // ─── Browser Startup ─────────────────────────────────────────────────────────
 
 chrome.runtime.onStartup.addListener(async () => {
+  startupInProgress = true;
   const cid = logger.correlationId();
   logger.info('Browser startup detected', null, cid);
 
@@ -244,6 +277,9 @@ chrome.runtime.onStartup.addListener(async () => {
     await runEvaluationCycle(cid);
   } catch (err) {
     logger.error('onStartup handler failed', { error: err.message, errorCode: ERROR_CODES.ERR_RECOVERY }, cid);
+  } finally {
+    startupInProgress = false;
+    logger.info('Startup guard cleared', null, cid);
   }
 });
 
@@ -339,6 +375,8 @@ async function _runEvaluationCycleInner(cid) {
         meta.groupId = actualGroupId;
         groupIdFixes++;
       }
+      // Keep URL in sync for cross-restart matching
+      if (ct.url && ct.url !== meta.url) meta.url = ct.url;
     }
     if (groupIdFixes > 0) {
       logger.info('Reconciled stale groupIds in tabMeta', { fixes: groupIdFixes }, cid);
@@ -432,14 +470,36 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       return;
     }
 
+    // During browser startup, Chrome restores the previous session and fires
+    // onCreated for each restored tab.  At that point groupId is not yet set,
+    // so placeNewTab would see ungrouped tabs and disrupt group restoration.
+    // Also, reconcileState may have already matched this tab by URL and
+    // preserved its age — we must NOT overwrite that entry with a fresh one.
+    if (startupInProgress) {
+      const state = await readState([STORAGE_KEYS.TAB_META]);
+      const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
+      if (!tabMeta[tab.id] && !tabMeta[String(tab.id)]) {
+        const currentActiveTime = await getCurrentActiveTime();
+        tabMeta[tab.id] = createTabEntry(tab, currentActiveTime);
+        await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      }
+      logger.debug('Startup in progress, skipping tab placement', { tabId: tab.id, windowId: tab.windowId }, cid);
+      return;
+    }
+
     // Track the new tab in meta
     const currentActiveTime = await getCurrentActiveTime();
-    const entry = createTabEntry(tab, currentActiveTime);
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
     const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
     const settings = state[STORAGE_KEYS.SETTINGS] || {};
-    tabMeta[tab.id] = entry;
+
+    // Only create a fresh entry if this tab isn't already tracked.
+    // After a restart, reconcileState may have already matched this tab
+    // by URL and preserved its age — we must not overwrite that entry.
+    if (!tabMeta[tab.id] && !tabMeta[String(tab.id)]) {
+      tabMeta[tab.id] = createTabEntry(tab, currentActiveTime);
+    }
 
     // Context-aware placement for non-command-created tabs (e.g., middle-click, link open)
     // Guard covers both placement and persist so onUpdated events triggered by
@@ -592,6 +652,12 @@ function _consumeDiscardRestoreMarker(tabId, now) {
 }
 
 async function _handleNavigationEvent(tabId, source) {
+  // During startup, session-restored tabs "navigate" to their saved URLs.
+  // These are not user-initiated navigations and must not reset tab ages.
+  if (startupInProgress) {
+    return;
+  }
+
   const now = Date.now();
   const last = _lastNavHandled.get(tabId) || 0;
   if (now - last < NAV_DEBOUNCE_MS) {
@@ -609,12 +675,14 @@ async function _handleNavigationEvent(tabId, source) {
     }
     // Skip navigations caused by Chrome restoring a suspended/discarded tab.
     // The tab was not actively navigated by the user — its age should not reset.
+    let navUrl = '';
     try {
       const tab = await chrome.tabs.get(tabId);
       if (tab.discarded || tab.status === 'unloaded') {
         logger.debug('Ignoring navigation for discarded/suspended tab', { tabId, source }, cid);
         return;
       }
+      navUrl = tab.url || '';
     } catch { /* tab gone — will be caught below */ }
 
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
@@ -627,7 +695,7 @@ async function _handleNavigationEvent(tabId, source) {
       return;
     }
     const currentActiveTime = await getCurrentActiveTime();
-    const updated = handleNavigation(existing, currentActiveTime);
+    const updated = handleNavigation(existing, currentActiveTime, navUrl);
     tabMeta[tabId] = updated;
 
     // Determine if the tab is in a special group.  Check both stored meta
@@ -843,8 +911,9 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
       // Check if this title change was initiated by the extension (guard flag)
       const extensionTitleWrite = typeof group.title === 'string'
         && consumeExpectedExtensionTitleUpdate(group.id, group.title);
-      const extensionColorWrite = typeof group.color === 'string'
-        && consumeExpectedExtensionColorUpdate(group.id, group.color);
+      if (typeof group.color === 'string') {
+        consumeExpectedExtensionColorUpdate(group.id, group.color);
+      }
 
       if (!extensionTitleWrite && typeof group.title === 'string') {
         // User renamed the special group — persist to settings
@@ -1055,6 +1124,7 @@ async function scanExistingTabs(cid) {
         groupId: tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? tab.groupId : null,
         isSpecialGroup: false,
         pinned: false,
+        url: tab.url || '',
       };
     }
 
@@ -1066,22 +1136,98 @@ async function scanExistingTabs(cid) {
 }
 
 async function reconcileState(cid) {
+  // Mutex: if reconciliation is already in progress (e.g. both onInstalled
+  // and onStartup fire on restart), wait for it instead of running twice.
+  if (reconcilePromise) {
+    logger.info('reconcileState already running, waiting for existing call', null, cid);
+    await reconcilePromise;
+    return;
+  }
+  reconcilePromise = reconcileStateImpl(cid);
   try {
-    const [chromeTabs, chromeWindows] = await Promise.all([
-      chrome.tabs.query({}),
-      chrome.windows.getAll(),
-    ]);
+    await reconcilePromise;
+  } finally {
+    reconcilePromise = null;
+  }
+}
 
+async function reconcileStateImpl(cid) {
+  try {
     const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
     const storedTabMeta = state[STORAGE_KEYS.TAB_META] || {};
     const storedWindowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+
+    // Count stored entries with matchable URLs (exclude blank/newtab) — if
+    // any exist we may need to wait for Chrome's session-restored tabs to
+    // finish loading their URLs before URL-based matching will work.
+    const isMatchableUrl = (u) => u && u !== '' && u !== 'about:blank' && u !== 'chrome://newtab/';
+    const storedUrlCount = Object.values(storedTabMeta)
+      .filter((m) => isMatchableUrl(m.url)).length;
+
+    let chromeTabs, chromeWindows;
+    if (storedUrlCount > 0) {
+      // Poll until Chrome tabs have real URLs (session restore loads lazily)
+      const deadline = Date.now() + 10_000;
+      let pollCount = 0;
+      while (Date.now() < deadline) {
+        [chromeTabs, chromeWindows] = await Promise.all([
+          chrome.tabs.query({}),
+          chrome.windows.getAll(),
+        ]);
+        const realUrlTabs = chromeTabs.filter(
+          (t) => !t.pinned && isMatchableUrl(t.url),
+        );
+        pollCount++;
+        if (realUrlTabs.length >= storedUrlCount) {
+          logger.info('URL readiness poll complete', {
+            pollCount,
+            storedUrlCount,
+            realUrlCount: realUrlTabs.length,
+            totalTabs: chromeTabs.length,
+            tabUrls: chromeTabs.map((t) => t.url),
+          }, cid);
+          break;
+        }
+        if (pollCount <= 3 || pollCount % 10 === 0) {
+          logger.debug('URL readiness poll waiting', {
+            pollCount,
+            storedUrlCount,
+            realUrlCount: realUrlTabs.length,
+            totalTabs: chromeTabs.length,
+            tabUrls: chromeTabs.map((t) => t.url),
+          }, cid);
+        }
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    } else {
+      [chromeTabs, chromeWindows] = await Promise.all([
+        chrome.tabs.query({}),
+        chrome.windows.getAll(),
+      ]);
+    }
+
     const currentActiveTime = await getCurrentActiveTime();
     const now = Date.now();
 
-    const chromeTabIds = new Set(chromeTabs.map((t) => t.id));
     const chromeWindowIds = new Set(chromeWindows.map((w) => w.id));
     const reconciledMeta = {};
     const liveGroupIdsByWindow = new Map();
+
+    // Build URL → old meta lookup for age preservation across restarts.
+    // Chrome assigns new tab IDs on restart, so ID-based matching fails;
+    // we fall back to URL matching to carry forward refresh timestamps.
+    const urlToOldMetas = new Map();
+    for (const meta of Object.values(storedTabMeta)) {
+      if (meta.url && meta.url !== 'chrome://newtab/' && meta.url !== '') {
+        const bucket = urlToOldMetas.get(meta.url) || [];
+        bucket.push(meta);
+        urlToOldMetas.set(meta.url, bucket);
+      }
+    }
+    const consumedOldMetas = new Set();
+    // Track old→new group ID mapping for remapping windowState references
+    const oldToNewGroupVotes = new Map(); // oldGroupId → Map(newGroupId → count)
+    let urlMatches = 0;
 
     for (const tab of chromeTabs) {
       if (tab.pinned) continue;
@@ -1097,19 +1243,80 @@ async function reconcileState(cid) {
         existing.windowId = tab.windowId;
         existing.groupId = liveGroupId;
         existing.pinned = tab.pinned;
+        existing.url = tab.url || existing.url || '';
         reconciledMeta[tab.id] = existing;
+        consumedOldMetas.add(existing);
       } else {
-        reconciledMeta[tab.id] = {
-          tabId: tab.id,
-          windowId: tab.windowId,
-          refreshActiveTime: currentActiveTime,
-          refreshWallTime: now,
-          status: STATUS.GREEN,
-          groupId: liveGroupId,
-          isSpecialGroup: false,
-          pinned: false,
-        };
+        // Tab not found by ID — try URL-based matching to preserve age
+        let matched = null;
+        if (tab.url && tab.url !== 'chrome://newtab/') {
+          const candidates = urlToOldMetas.get(tab.url);
+          if (candidates) {
+            for (let i = 0; i < candidates.length; i++) {
+              if (!consumedOldMetas.has(candidates[i])) {
+                matched = candidates[i];
+                consumedOldMetas.add(matched);
+                candidates.splice(i, 1);
+                urlMatches++;
+                break;
+              }
+            }
+          }
+        }
+
+        if (matched) {
+          // Record old→new group mapping for windowState remapping
+          if (matched.groupId !== null && liveGroupId !== null) {
+            const votes = oldToNewGroupVotes.get(matched.groupId) || new Map();
+            votes.set(liveGroupId, (votes.get(liveGroupId) || 0) + 1);
+            oldToNewGroupVotes.set(matched.groupId, votes);
+          }
+          reconciledMeta[tab.id] = {
+            tabId: tab.id,
+            windowId: tab.windowId,
+            refreshActiveTime: matched.refreshActiveTime,
+            refreshWallTime: matched.refreshWallTime,
+            status: matched.status,
+            groupId: liveGroupId,
+            isSpecialGroup: false,
+            pinned: false,
+            url: tab.url || '',
+          };
+        } else {
+          reconciledMeta[tab.id] = {
+            tabId: tab.id,
+            windowId: tab.windowId,
+            refreshActiveTime: currentActiveTime,
+            refreshWallTime: now,
+            status: STATUS.GREEN,
+            groupId: liveGroupId,
+            isSpecialGroup: false,
+            pinned: false,
+            url: tab.url || '',
+          };
+        }
       }
+    }
+
+    // Resolve old→new group ID mapping (pick the new group with most tab matches)
+    const groupIdMap = new Map();
+    for (const [oldGid, newGidCounts] of oldToNewGroupVotes) {
+      let bestNewGid = null;
+      let bestCount = 0;
+      for (const [newGid, count] of newGidCounts) {
+        if (count > bestCount) {
+          bestCount = count;
+          bestNewGid = newGid;
+        }
+      }
+      if (bestNewGid !== null) groupIdMap.set(oldGid, bestNewGid);
+    }
+
+    if (urlMatches > 0) {
+      logger.info('URL-based tab matching preserved ages across restart', {
+        urlMatches,
+        groupMappings: groupIdMap.size,
+      }, cid);
     }
 
     const reconciledWindowState = {};
@@ -1118,7 +1325,7 @@ async function reconcileState(cid) {
       if (chromeWindowIds.has(Number(wid))) {
         const liveGroupIds = liveGroupIdsByWindow.get(Number(wid)) || new Set();
         const currentState = ws && typeof ws === 'object' ? ws : {};
-        const specialGroups = currentState.specialGroups && typeof currentState.specialGroups === 'object'
+        const storedSpecialGroups = currentState.specialGroups && typeof currentState.specialGroups === 'object'
           ? currentState.specialGroups
           : { yellow: null, red: null };
         const groupZones = currentState.groupZones && typeof currentState.groupZones === 'object'
@@ -1128,9 +1335,29 @@ async function reconcileState(cid) {
           ? currentState.groupNaming
           : {};
 
+        // Remap special group IDs using the old→new mapping.
+        // After a restart Chrome assigns new group IDs, so the stored
+        // references become stale; the groupIdMap lets us recover them.
+        const specialGroups = { yellow: null, red: null };
+        for (const type of ['yellow', 'red']) {
+          const oldId = storedSpecialGroups[type];
+          if (oldId === null) continue;
+          const newId = groupIdMap.get(oldId);
+          if (newId !== undefined && liveGroupIds.has(newId)) {
+            specialGroups[type] = newId;
+          } else if (liveGroupIds.has(oldId)) {
+            specialGroups[type] = oldId; // ID didn't change
+          }
+          // else: group no longer exists → stays null
+        }
+
+        // Remap groupNaming entries: try the stored ID first, then
+        // fall back to the old→new mapping so naming metadata survives restarts.
         const groupNaming = {};
         for (const [groupId, metadata] of Object.entries(groupNamingSource)) {
-          if (liveGroupIds.has(Number(groupId))) {
+          const numId = Number(groupId);
+          const resolvedId = liveGroupIds.has(numId) ? numId : (groupIdMap.get(numId) ?? null);
+          if (resolvedId !== null && liveGroupIds.has(resolvedId)) {
             const now = Date.now();
             const firstUnnamedSeenAt = Number.isFinite(metadata?.firstUnnamedSeenAt) && metadata.firstUnnamedSeenAt > 0
               ? metadata.firstUnnamedSeenAt
@@ -1144,7 +1371,7 @@ async function reconcileState(cid) {
             const userEditLockUntil = Number.isFinite(metadata?.userEditLockUntil) && metadata.userEditLockUntil > 0
               ? metadata.userEditLockUntil
               : now;
-            groupNaming[groupId] = {
+            groupNaming[resolvedId] = {
               firstUnnamedSeenAt,
               lastAutoNamedAt,
               lastCandidate,
@@ -1171,14 +1398,30 @@ async function reconcileState(cid) {
       }
     }
 
+    // Debug: store reconciliation details for test visibility
+    const _debugReconcile = {
+      storedUrlCount,
+      urlMatches,
+      idMatches: Object.values(reconciledMeta).filter((m) =>
+        storedTabMeta[m.tabId] || storedTabMeta[String(m.tabId)],
+      ).length,
+      freshEntries: Object.values(reconciledMeta).filter((m) =>
+        m.refreshWallTime >= now - 2000,
+      ).map((m) => ({ url: m.url, tabId: m.tabId })),
+      chromeTabUrls: chromeTabs.map((t) => ({ id: t.id, url: t.url, pinned: t.pinned })),
+      storedUrls: Object.values(storedTabMeta).map((m) => ({ tabId: m.tabId, url: m.url })),
+    };
+
     await batchWrite({
       [STORAGE_KEYS.TAB_META]: reconciledMeta,
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
+      __debugReconcile: _debugReconcile,
     });
 
     logger.info('State reconciled', {
       tabsInChrome: chromeTabs.length,
       tabsReconciled: Object.keys(reconciledMeta).length,
+      urlMatches,
       windowsReconciled: Object.keys(reconciledWindowState).length,
       chromeWindowCount: chromeWindows.length,
       chromeWindowTypes: chromeWindows.map((w) => ({ id: w.id, type: w.type })),

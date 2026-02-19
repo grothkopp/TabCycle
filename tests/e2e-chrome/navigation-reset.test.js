@@ -5,7 +5,7 @@
  * it from any special group (Yellow/Red).
  */
 
-import { createHarness, sleep } from './harness.js';
+import { createHarness } from './harness.js';
 
 const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 
@@ -68,7 +68,7 @@ describeOrSkip('Navigation Reset (real Chrome)', () => {
 
     let tab = await h.getTab(tabId);
     expect(tab.groupId).not.toBe(-1);
-    const yellowGroupId = tab.groupId;
+    const _yellowGroupId = tab.groupId;
 
     // Navigate → should ungroup
     await h.navigateTab(tabId, 'https://example.org');

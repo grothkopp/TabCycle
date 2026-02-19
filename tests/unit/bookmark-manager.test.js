@@ -22,7 +22,6 @@ globalThis.chrome = {
 };
 
 import {
-  getOtherBookmarksId,
   resolveBookmarkFolder,
   isBookmarkableUrl,
   bookmarkTab,

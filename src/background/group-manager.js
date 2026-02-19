@@ -966,7 +966,7 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
     attempted: 0,
   };
 
-  let groups = [];
+  let groups;
   try {
     groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
   } catch (err) {
@@ -1026,7 +1026,7 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
 
     summary.attempted++;
 
-    let groupTabs = [];
+    let groupTabs;
     try {
       groupTabs = await chrome.tabs.query({ groupId: group.id });
     } catch (err) {
@@ -1042,7 +1042,7 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
     const candidate = generateGroupNameFromTabs(groupTabs.filter((tab) => !tab.pinned));
     const candidateName = normalizeCandidate(candidate?.name) || 'Tabs';
 
-    let liveGroup = null;
+    let liveGroup;
     try {
       liveGroup = await chrome.tabGroups.get(group.id);
     } catch (err) {

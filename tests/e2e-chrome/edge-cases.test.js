@@ -124,7 +124,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
   it('evaluation cycle runs cleanly with no tracked tabs', async () => {
     // resetTabs already leaves just one tab; close all tracked tabs
     const meta = await h.getTabMeta();
-    const trackedIds = Object.keys(meta).map(Number).filter(Boolean);
+    const _trackedIds = Object.keys(meta).map(Number).filter(Boolean);
 
     // We can't close the very last tab (Chrome won't allow it), but we
     // can pin it so it's removed from tracking
@@ -141,7 +141,7 @@ describeOrSkip('Edge Cases (real Chrome)', () => {
 
     const metaAfter = await h.getTabMeta();
     // Should have no tracked tabs (or only the pinned one which is excluded)
-    const unpinnedEntries = Object.values(metaAfter).filter((m) => !m.pinned);
+    const _unpinnedEntries = Object.values(metaAfter).filter((m) => !m.pinned);
     // This is fine — there may be 0 or a few entries
     // The key assertion is that the cycle didn't crash
 

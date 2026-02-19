@@ -34,7 +34,6 @@ const {
   handleFocusChange,
   getCurrentActiveTime,
   persistActiveTime,
-  loadActiveTime,
   getCachedActiveTimeState,
 } = await import('../../src/background/time-accumulator.js');
 
@@ -112,7 +111,7 @@ describe('time-accumulator', () => {
 
     it('should stop accumulating and add delta when all windows lose focus', async () => {
       await handleFocusChange(1); // gain focus
-      const before = await getCurrentActiveTime();
+      await getCurrentActiveTime();
 
       // Simulate small delay
       const result = await handleFocusChange(chrome.windows.WINDOW_ID_NONE); // lose focus

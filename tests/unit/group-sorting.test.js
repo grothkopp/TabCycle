@@ -1116,7 +1116,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      await sortTabsAndGroups(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[2]).toBe('red');
     });
@@ -1615,7 +1615,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: true, tabgroupSortingEnabled: true, tabgroupColoringEnabled: false };
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
 
       // Color updates should NOT have been called
       const colorUpdateCalls = chrome.tabGroups.update.mock.calls.filter(

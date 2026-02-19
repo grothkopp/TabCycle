@@ -75,7 +75,7 @@ export async function createHarness(opts = {}) {
   // Stable Google Chrome blocks that flag.  Override with CHROME_E2E_PATH if needed.
   const executablePath = process.env.CHROME_E2E_PATH || puppeteer.default.executablePath();
 
-  const browser = await puppeteer.default.launch({
+  const launchOpts = {
     headless: false,
     executablePath,
     // Puppeteer adds --disable-extensions by default; we must remove it.
@@ -94,7 +94,12 @@ export async function createHarness(opts = {}) {
       ...(opts.extraArgs || []),
     ],
     defaultViewport: null,
-  });
+  };
+  // Allow callers to reuse a profile directory (e.g. for restart tests).
+  // When set, Puppeteer won't delete it on browser.close().
+  if (opts.userDataDir) launchOpts.userDataDir = opts.userDataDir;
+
+  const browser = await puppeteer.default.launch(launchOpts);
 
   // Wait for the extension's service worker target to appear.
   // We poll browser.targets() because waitForTarget can miss targets

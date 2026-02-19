@@ -41,7 +41,7 @@ globalThis.chrome = {
   },
 };
 
-const { STORAGE_KEYS, DEFAULT_THRESHOLDS, TIME_MODE, STATUS } = await import('../../src/shared/constants.js');
+const { TIME_MODE, STATUS } = await import('../../src/shared/constants.js');
 const { evaluateAllTabs } = await import('../../src/background/status-evaluator.js');
 const { autoNameEligibleGroups } = await import('../../src/background/group-manager.js');
 

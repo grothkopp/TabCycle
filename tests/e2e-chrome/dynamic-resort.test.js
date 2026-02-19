@@ -305,7 +305,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       const redTabs = await h.openTabs(2, 'https://example.com');
 
       const windowId = (await h.getTab(greenTabs[0])).windowId;
-      const greenGroup = await h.createUserGroup(greenTabs, 'FreshGrp', windowId);
+      const _greenGroup = await h.createUserGroup(greenTabs, 'FreshGrp', windowId);
       const redGroup = await h.createUserGroup(redTabs, 'OldGrp', windowId);
 
       for (const id of greenTabs) await h.backdateTab(id, 0);
@@ -350,7 +350,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       const yellowTabs = await h.openTabs(2, 'https://example.com');
 
       const windowId = (await h.getTab(greenTabs[0])).windowId;
-      const greenGroup = await h.createUserGroup(greenTabs, 'GreenGrp', windowId);
+      const _greenGroup = await h.createUserGroup(greenTabs, 'GreenGrp', windowId);
       const yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGrp', windowId);
 
       for (const id of greenTabs) await h.backdateTab(id, 0);
@@ -395,7 +395,7 @@ describeOrSkip('Dynamic Resort Scenarios (real Chrome)', () => {
       const redTabs = await h.openTabs(2, 'https://example.com');
 
       const windowId = (await h.getTab(yellowTabs[0])).windowId;
-      const yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGrp', windowId);
+      const _yellowGroup = await h.createUserGroup(yellowTabs, 'YellowGrp', windowId);
       const redGroup = await h.createUserGroup(redTabs, 'RedGrp', windowId);
 
       for (const id of yellowTabs) await h.backdateTab(id, 2500);

@@ -12,15 +12,17 @@ export function createTabEntry(tab, activeTimeMs) {
     groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
     isSpecialGroup: false,
     pinned: tab.pinned || false,
+    url: tab.url || '',
   };
 }
 
-export function handleNavigation(existingMeta, activeTimeMs) {
+export function handleNavigation(existingMeta, activeTimeMs, url) {
   return {
     ...existingMeta,
     refreshActiveTime: activeTimeMs,
     refreshWallTime: Date.now(),
     status: STATUS.GREEN,
+    url: url || existingMeta.url || '',
   };
 }
 
@@ -38,6 +40,7 @@ export function reconcileTabs(storedMeta, chromeTabs, activeTimeMs) {
         windowId: tab.windowId,
         groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
         pinned: tab.pinned || false,
+        url: tab.url || stored.url || '',
       };
     } else {
       reconciled[tab.id] = {
@@ -49,6 +52,7 @@ export function reconcileTabs(storedMeta, chromeTabs, activeTimeMs) {
         groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
         isSpecialGroup: false,
         pinned: false,
+        url: tab.url || '',
       };
     }
   }

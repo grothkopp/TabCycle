@@ -6,7 +6,7 @@
  * when they return to green.
  */
 
-import { createHarness, sleep } from './harness.js';
+import { createHarness } from './harness.js';
 
 const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 

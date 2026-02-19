@@ -1,5 +1,5 @@
 import { createLogger } from '../shared/logger.js';
-import { STATUS, ERROR_CODES } from '../shared/constants.js';
+import { ERROR_CODES } from '../shared/constants.js';
 import { isSpecialGroup, trackExtensionGroup } from './group-manager.js';
 
 const logger = createLogger('background');

@@ -5,7 +5,7 @@
  * observing real Chrome tab state after evaluation cycles.
  */
 
-import { createHarness, sleep, SK } from './harness.js';
+import { createHarness } from './harness.js';
 
 const describeOrSkip = process.env.SKIP_E2E_CHROME ? describe.skip : describe;
 

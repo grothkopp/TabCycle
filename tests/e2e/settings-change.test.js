@@ -5,7 +5,6 @@
  *   PUPPETEER_EXECUTABLE_PATH=/path/to/chrome npm run test:e2e
  */
 
-import { jest } from '@jest/globals';
 
 const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
 const describeOrSkip = CHROME_PATH ? describe : describe.skip;

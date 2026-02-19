@@ -42,11 +42,10 @@ globalThis.chrome = {
 };
 
 const {
-  STORAGE_KEYS, DEFAULT_THRESHOLDS, TIME_MODE, STATUS,
-  DEFAULT_AGING_TOGGLES, DEFAULT_TRANSITION_TOGGLES,
+  TIME_MODE, STATUS,
 } = await import('../../src/shared/constants.js');
-const { evaluateAllTabs, computeStatus, computeAge } = await import('../../src/background/status-evaluator.js');
-const { sortTabsAndGroups, dissolveSpecialGroups } = await import('../../src/background/group-manager.js');
+const { evaluateAllTabs, computeStatus } = await import('../../src/background/status-evaluator.js');
+const { sortTabsAndGroups } = await import('../../src/background/group-manager.js');
 const { placeNewTab } = await import('../../src/background/tab-placer.js');
 
 // Helper: build settings with all v2 fields

@@ -9,7 +9,6 @@
  * with a Chrome binary available.
  */
 
-import { jest } from '@jest/globals';
 
 // Skip E2E tests if no Chrome binary is available
 const CHROME_PATH = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_PATH;
