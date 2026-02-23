@@ -634,6 +634,113 @@ chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
   }
 });
 
+// ─── Tab Activation (Focus-Based Refresh) ────────────────────────────────────
+// When a tab stays focused for more than 15 seconds, reset its age to green.
+// This treats sustained viewing as user engagement with the tab.
+const FOCUS_REFRESH_DELAY_MS = 15_000;
+let _focusRefreshTimer = null;
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  // Clear any pending focus-refresh timer from the previous tab
+  if (_focusRefreshTimer !== null) {
+    clearTimeout(_focusRefreshTimer);
+    _focusRefreshTimer = null;
+  }
+
+  if (startupInProgress) return;
+
+  const { tabId, windowId } = activeInfo;
+  _focusRefreshTimer = setTimeout(() => {
+    _focusRefreshTimer = null;
+    _handleFocusRefresh(tabId, windowId);
+  }, FOCUS_REFRESH_DELAY_MS);
+});
+
+async function _handleFocusRefresh(tabId, windowId) {
+  const cid = logger.correlationId();
+  navigationMutationTabs.add(tabId);
+  try {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+      if (tab.pinned) return;
+    } catch { return; } // tab gone
+
+    const state = await readState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
+    const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
+    const windowState = state[STORAGE_KEYS.WINDOW_STATE] || {};
+    const settings = state[STORAGE_KEYS.SETTINGS] || {};
+    const existing = tabMeta[tabId] || tabMeta[String(tabId)];
+    if (!existing) return;
+
+    const currentActiveTime = await getCurrentActiveTime();
+    const updated = handleNavigation(existing, currentActiveTime, existing.url);
+    tabMeta[tabId] = updated;
+
+    // If tab was in a special group, ungroup it (now refreshed to green)
+    let inSpecialGroup = existing.isSpecialGroup && existing.groupId !== null;
+    let specialGroupId = inSpecialGroup ? existing.groupId : null;
+
+    if (!inSpecialGroup) {
+      const liveGroupId = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+        ? tab.groupId : null;
+      if (liveGroupId !== null && isSpecialGroup(liveGroupId, tab.windowId, windowState)) {
+        inSpecialGroup = true;
+        specialGroupId = liveGroupId;
+        updated.groupId = liveGroupId;
+        updated.isSpecialGroup = true;
+      }
+    }
+
+    if (inSpecialGroup) {
+      await ungroupTab(tabId);
+      updated.groupId = null;
+      updated.isSpecialGroup = false;
+      tabMeta[tabId] = updated;
+
+      try {
+        await chrome.tabs.move(tabId, { index: 0 });
+      } catch (moveErr) {
+        logger.warn('Failed to move ungrouped tab to green zone', {
+          tabId,
+          error: moveErr.message,
+        }, cid);
+      }
+
+      const groupType = getSpecialGroupType(specialGroupId, existing.windowId, windowState);
+      if (groupType) {
+        await removeSpecialGroupIfEmpty(existing.windowId, groupType, windowState);
+      }
+
+      logger.debug('Focus refresh: tab removed from special group', {
+        tabId, specialGroupId, windowId: existing.windowId,
+      }, cid);
+    }
+
+    const agingOn = settings.agingEnabled !== false;
+    const groupId = updated.groupId;
+    if (agingOn && groupId !== null && !updated.isSpecialGroup
+        && !isSpecialGroup(groupId, existing.windowId, windowState)) {
+      if (settings.tabgroupColoringEnabled !== false) {
+        const groupStatus = computeGroupStatus(groupId, tabMeta);
+        if (groupStatus) {
+          await updateGroupColor(groupId, groupStatus);
+        }
+      }
+    }
+    if (agingOn) {
+      await sortTabsAndGroups(existing.windowId, tabMeta, windowState, undefined, settings);
+    }
+
+    await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
+    logger.debug('Focus-based age refresh applied', { tabId, windowId }, cid);
+  } catch (err) {
+    logger.error('Focus refresh handler failed', { tabId, error: err.message }, cid);
+  } finally {
+    navigationMutationTabs.delete(tabId);
+  }
+}
+
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
 // Per-tab debounce: avoid double-processing when both onCommitted and

@@ -75,6 +75,7 @@ async function loadServiceWorker() {
       onRemoved: makeEvent('tabsOnRemoved'),
       onUpdated: makeEvent('tabsOnUpdated'),
       onMoved: makeEvent('tabsOnMoved'),
+      onActivated: makeEvent('tabsOnActivated'),
       onDetached: makeEvent('tabsOnDetached'),
       onAttached: makeEvent('tabsOnAttached'),
       get: jest.fn(async () => ({ id: 0, windowId: 1, groupId: -1, discarded: false, status: 'complete' })),
