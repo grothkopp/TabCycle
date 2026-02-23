@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.0.0...tabcycle-v1.1.0) (2026-02-23)
+
+
+### Features
+
+* **focus_refresh:** tabs refresh when focused for 15 seconds ([#6](https://github.com/grothkopp/TabCycle/issues/6)) ([922110b](https://github.com/grothkopp/TabCycle/commit/922110b35d8585882268570fcff6c9ccfb416eb6))
+
 ## [1.0.0](https://github.com/grothkopp/TabCycle/compare/tabcycle-v0.3.0...tabcycle-v1.0.0) (2026-02-19)
 
 
