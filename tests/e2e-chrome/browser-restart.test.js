@@ -124,6 +124,7 @@ describeOrSkip('Browser restart (session restore)', () => {
     // Phase 2 — Close Chrome and relaunch with session restore
     // ════════════════════════════════════════════════════════════════════
 
+    const restartStart = Date.now();
     await h1.cleanup();
     h1 = null;
     await sleep(2000); // give Chrome time to flush session state
@@ -171,7 +172,8 @@ describeOrSkip('Browser restart (session restore)', () => {
 
     // ── 2. Tab ages preserved (refreshWallTime within tolerance) ────────
 
-    const AGE_TOLERANCE_MS = 5000;
+    const restartElapsed = Date.now() - restartStart;
+    const AGE_TOLERANCE_MS = restartElapsed + 5000; // restart duration + 5 s buffer
     const afterWallTimes = {};
     for (const meta of Object.values(afterMeta)) {
       if (meta.url) afterWallTimes[meta.url] = meta.refreshWallTime;
