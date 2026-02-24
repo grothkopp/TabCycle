@@ -358,7 +358,7 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
       }, {});
     });
 
-    for (const [id, exists] of Object.entries(structure)) {
+    for (const [_id, exists] of Object.entries(structure)) {
       expect(exists).toBe(true);
     }
 

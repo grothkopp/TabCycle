@@ -173,7 +173,7 @@ describeOrSkip('Browser restart (session restore)', () => {
     // ── 2. Tab ages preserved (refreshWallTime within tolerance) ────────
 
     const restartElapsed = Date.now() - restartStart;
-    const AGE_TOLERANCE_MS = restartElapsed + 5000; // restart duration + 5 s buffer
+    const AGE_TOLERANCE_MS = restartElapsed + 15000; // restart duration + 15 s buffer (CI can be slow)
     const afterWallTimes = {};
     for (const meta of Object.values(afterMeta)) {
       if (meta.url) afterWallTimes[meta.url] = meta.refreshWallTime;

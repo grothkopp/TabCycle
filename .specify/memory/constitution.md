@@ -1,15 +1,14 @@
 <!--
 Sync Impact Report
-- Version change: 1.0.0 -> 1.1.0
+- Version change: 1.1.0 -> 1.2.0
 - Modified principles:
-  - I. Mandatory Multi-Layer Testing -> I. Mandatory Multi-Layer Testing (expanded with E2E Puppeteer mandate)
+  - I. Mandatory Multi-Layer Testing: E2E section updated from Puppeteer to e2e-chrome harness
 - Added sections:
-  - E2E Testing with Puppeteer (sub-section under Principle I)
+  - VI. Self-Documenting Code (Knuth Rework)
 - Removed sections:
   - None
 - Templates requiring updates:
-  - ✅ updated: .specify/templates/plan-template.md (E2E testing phase added)
-  - ✅ updated: .specify/templates/spec-template.md (E2E test considerations added)
+  - ⚠ pending: .specify/templates/plan-template.md (naming review step)
   - ⚠ pending: .specify/templates/tasks-template.md
 - Follow-up TODOs:
   - None
@@ -28,7 +27,7 @@ assuming the test itself is wrong — a failing test is evidence, not noise.
 This is non-negotiable because Chrome extension behavior spans isolated runtimes
 where regressions are hard to detect manually.
 
-#### E2E Testing with Puppeteer
+#### E2E Testing with Real Chrome (e2e-chrome)
 
 Chrome extension projects MUST include an E2E test suite that launches a real Chrome
 instance with the extension installed and observes actual outcomes via the Chrome
@@ -41,8 +40,7 @@ cannot catch real-world issues such as:
 - Chrome closing when the last tab is removed during test cleanup
 
 **Architecture requirements for the E2E harness:**
-- Use Puppeteer's bundled "Chrome for Testing" binary (stable Chrome blocks
-  `--load-extension`).
+- Use Chrome for Testing binary (stable Chrome blocks `--load-extension`).
 - Communicate with the extension's service worker via CDP (`Runtime.evaluate`),
   not `page.evaluate` (which runs in page context, not the SW).
 - The extension MUST expose `self.__runEvaluationCycle` on `globalThis` so the
@@ -70,8 +68,8 @@ cannot catch real-world issues such as:
 - After changes to unit test files themselves.
 - After changes isolated to pure-logic modules with full unit test coverage.
 
-E2E tests are NOT part of the default `npm test` command. They run via a separate
-command (e.g., `npm run test:e2e-chrome`) and require a display server.
+E2E tests are part of `npm test` (opt-out via `SKIP_E2E_CHROME=1`) and run in CI
+via sharded GitHub Actions with `setup-xvfb` for headless display.
 
 ### II. Structured Logging and Privacy-Safe Diagnostics
 Runtime diagnostics MUST use structured logs with stable fields: timestamp,
@@ -121,7 +119,7 @@ guards against brittle coupling across extension execution contexts.
 ## Development Workflow & Quality Gates
 
 - Every feature plan MUST include a constitution check that maps planned changes to
-  all five core principles.
+  all six core principles.
 - Every spec MUST include an extension impact assessment: contexts touched,
   manifest/permission deltas, logging changes, documentation changes, and contract
   migrations.
@@ -131,6 +129,20 @@ guards against brittle coupling across extension execution contexts.
   present, and manifest/permission changes are reviewed.
 - Release candidates MUST pass a manual smoke test on a clean Chrome profile and
   policy/compliance checklist review.
+
+### VI. Self-Documenting Code (Knuth Rework)
+Every function, variable, and constant MUST be named so that its purpose is
+immediately clear without reading surrounding code or comments. Names should read
+like prose: `findOrCreateBookmarkFolderForClosedTabs` over `resolveBookmarkFolder`,
+`isUrlWorthBookmarking` over `isBookmarkableUrl`, `DEFAULT_AGING_THRESHOLDS` over
+`DEFAULT_THRESHOLDS`. Docstring comments MUST still be present on exported functions
+to describe parameters, return values, and edge cases — but the code itself should be
+readable and understandable by someone unfamiliar with the codebase. When renaming
+across the codebase, config object property keys that form an internal API contract
+(e.g., `goneConfig.bookmarkTab`) need not be renamed if they are already clear in
+context. This principle exists because Chrome extension codebases span multiple
+isolated runtimes where tracing a name back to its definition is slow; descriptive
+names eliminate that round-trip.
 
 ## Governance
 
@@ -150,4 +162,4 @@ Compliance expectations:
 - Exceptions MUST be documented in the implementation plan's complexity tracking with
   an expiry or follow-up task.
 
-**Version**: 1.1.0 | **Ratified**: 2026-02-12 | **Last Amended**: 2026-02-14
+**Version**: 1.2.0 | **Ratified**: 2026-02-12 | **Last Amended**: 2026-02-24
