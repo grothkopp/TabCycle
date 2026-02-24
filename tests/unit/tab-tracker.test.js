@@ -17,19 +17,19 @@ globalThis.chrome = {
 };
 
 const {
-  createTabEntry,
-  handleNavigation,
-  reconcileTabs,
+  createFreshTabMetadata,
+  resetTabAgeAfterNavigation,
+  reconcileTabMetadataWithBrowserTabs,
 } = await import('../../src/background/tab-tracker.js');
 
 describe('tab-tracker', () => {
-  describe('createTabEntry', () => {
+  describe('createFreshTabMetadata', () => {
     it('should create a green entry with correct refresh times', () => {
       const tab = { id: 1, windowId: 1, groupId: -1, pinned: false, url: 'https://example.com' };
       const activeTimeMs = 5000;
       const now = Date.now();
 
-      const entry = createTabEntry(tab, activeTimeMs);
+      const entry = createFreshTabMetadata(tab, activeTimeMs);
 
       expect(entry.tabId).toBe(1);
       expect(entry.windowId).toBe(1);
@@ -45,24 +45,24 @@ describe('tab-tracker', () => {
 
     it('should default url to empty string when tab has no url', () => {
       const tab = { id: 1, windowId: 1, groupId: -1, pinned: false };
-      const entry = createTabEntry(tab, 0);
+      const entry = createFreshTabMetadata(tab, 0);
       expect(entry.url).toBe('');
     });
 
     it('should set groupId when tab is in a group', () => {
       const tab = { id: 2, windowId: 1, groupId: 5, pinned: false };
-      const entry = createTabEntry(tab, 0);
+      const entry = createFreshTabMetadata(tab, 0);
       expect(entry.groupId).toBe(5);
     });
 
     it('should mark pinned tabs', () => {
       const tab = { id: 3, windowId: 1, groupId: -1, pinned: true };
-      const entry = createTabEntry(tab, 0);
+      const entry = createFreshTabMetadata(tab, 0);
       expect(entry.pinned).toBe(true);
     });
   });
 
-  describe('handleNavigation', () => {
+  describe('resetTabAgeAfterNavigation', () => {
     it('should reset refresh times and set status to green', () => {
       const existing = {
         tabId: 1,
@@ -78,7 +78,7 @@ describe('tab-tracker', () => {
       const activeTimeMs = 5000;
       const now = Date.now();
 
-      const updated = handleNavigation(existing, activeTimeMs, 'https://new.com');
+      const updated = resetTabAgeAfterNavigation(existing, activeTimeMs, 'https://new.com');
 
       expect(updated.refreshActiveTime).toBe(5000);
       expect(updated.refreshWallTime).toBeGreaterThanOrEqual(now - 10);
@@ -102,7 +102,7 @@ describe('tab-tracker', () => {
         url: 'https://old.com',
       };
 
-      const updated = handleNavigation(existing, 50000, 'https://new.com');
+      const updated = resetTabAgeAfterNavigation(existing, 50000, 'https://new.com');
       expect(updated.status).toBe('green');
       expect(updated.refreshActiveTime).toBe(50000);
       expect(updated.url).toBe('https://new.com');
@@ -114,12 +114,12 @@ describe('tab-tracker', () => {
         status: 'yellow', groupId: null, isSpecialGroup: false, pinned: false,
         url: 'https://preserved.com',
       };
-      const updated = handleNavigation(existing, 1000);
+      const updated = resetTabAgeAfterNavigation(existing, 1000);
       expect(updated.url).toBe('https://preserved.com');
     });
   });
 
-  describe('reconcileTabs', () => {
+  describe('reconcileTabMetadataWithBrowserTabs', () => {
     it('should retain existing tabs that are still in Chrome', () => {
       const storedMeta = {
         1: { tabId: 1, windowId: 1, refreshActiveTime: 1000, refreshWallTime: 1000, status: 'yellow', groupId: null, isSpecialGroup: false, pinned: false, url: 'https://a.com' },
@@ -128,7 +128,7 @@ describe('tab-tracker', () => {
         { id: 1, windowId: 1, groupId: -1, pinned: false, url: 'https://a.com' },
       ];
 
-      const result = reconcileTabs(storedMeta, chromeTabs, 5000);
+      const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 5000);
       expect(result[1].status).toBe('yellow');
       expect(result[1].refreshActiveTime).toBe(1000);
       expect(result[1].url).toBe('https://a.com');
@@ -140,7 +140,7 @@ describe('tab-tracker', () => {
         { id: 2, windowId: 1, groupId: -1, pinned: false, url: 'https://new.com' },
       ];
 
-      const result = reconcileTabs(storedMeta, chromeTabs, 5000);
+      const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 5000);
       expect(result[2].status).toBe('green');
       expect(result[2].refreshActiveTime).toBe(5000);
       expect(result[2].url).toBe('https://new.com');
@@ -155,7 +155,7 @@ describe('tab-tracker', () => {
         { id: 1, windowId: 1, groupId: -1, pinned: false },
       ];
 
-      const result = reconcileTabs(storedMeta, chromeTabs, 5000);
+      const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 5000);
       expect(result[1]).toBeDefined();
       expect(result[99]).toBeUndefined();
     });
@@ -166,7 +166,7 @@ describe('tab-tracker', () => {
         { id: 1, windowId: 1, groupId: -1, pinned: true },
       ];
 
-      const result = reconcileTabs(storedMeta, chromeTabs, 0);
+      const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 0);
       expect(result[1]).toBeUndefined();
     });
 
@@ -178,7 +178,7 @@ describe('tab-tracker', () => {
         { id: 1, windowId: 2, groupId: 5, pinned: false, url: 'https://a.com' },
       ];
 
-      const result = reconcileTabs(storedMeta, chromeTabs, 5000);
+      const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 5000);
       expect(result[1].windowId).toBe(2);
       expect(result[1].groupId).toBe(5);
       // But preserve refresh times and status

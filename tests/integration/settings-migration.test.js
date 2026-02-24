@@ -28,28 +28,28 @@ globalThis.chrome = {
   tabGroups: { TAB_GROUP_ID_NONE: -1 },
 };
 
-const { readState, batchWrite } = await import('../../src/background/state-persistence.js');
+const { readValidatedStateFromStorage, writeMultipleStateEntries } = await import('../../src/background/state-persistence.js');
 const {
   STORAGE_KEYS,
-  DEFAULT_THRESHOLDS,
-  DEFAULT_AGING_TOGGLES,
-  DEFAULT_TRANSITION_TOGGLES,
-  DEFAULT_GROUP_NAMES,
-  DEFAULT_AUTO_GROUP,
+  DEFAULT_AGING_THRESHOLDS,
+  DEFAULT_AGING_FEATURE_TOGGLES,
+  DEFAULT_STATUS_TRANSITION_TOGGLES,
+  DEFAULT_MANAGED_GROUP_NAMES,
+  DEFAULT_AUTO_GROUPING_SETTINGS,
   DEFAULT_BOOKMARK_SETTINGS,
-  DEFAULT_AUTO_GROUP_NAMING,
-  DEFAULT_SHOW_GROUP_AGE,
-  TIME_MODE,
+  DEFAULT_AUTO_NAMING_SETTINGS,
+  DEFAULT_SHOW_AGE_IN_GROUP_TITLES,
+  AGE_CALCULATION_MODE,
 } = await import('../../src/shared/constants.js');
 
 // Helper: build a minimal v1 settings object (pre-migration)
 function buildV1Settings(overrides = {}) {
   return {
-    timeMode: TIME_MODE.ACTIVE,
+    timeMode: AGE_CALCULATION_MODE.ACTIVE,
     thresholds: {
-      greenToYellow: DEFAULT_THRESHOLDS.GREEN_TO_YELLOW,
-      yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
-      redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
+      greenToYellow: DEFAULT_AGING_THRESHOLDS.GREEN_TO_YELLOW,
+      yellowToRed: DEFAULT_AGING_THRESHOLDS.YELLOW_TO_RED,
+      redToGone: DEFAULT_AGING_THRESHOLDS.RED_TO_GONE,
     },
     showGroupAge: false,
     bookmarkEnabled: true,
@@ -63,50 +63,50 @@ function buildV1Settings(overrides = {}) {
 // Helper: build a complete v2 settings object
 function buildV2Defaults() {
   return {
-    timeMode: TIME_MODE.ACTIVE,
+    timeMode: AGE_CALCULATION_MODE.ACTIVE,
     thresholds: {
-      greenToYellow: DEFAULT_THRESHOLDS.GREEN_TO_YELLOW,
-      yellowToRed: DEFAULT_THRESHOLDS.YELLOW_TO_RED,
-      redToGone: DEFAULT_THRESHOLDS.RED_TO_GONE,
+      greenToYellow: DEFAULT_AGING_THRESHOLDS.GREEN_TO_YELLOW,
+      yellowToRed: DEFAULT_AGING_THRESHOLDS.YELLOW_TO_RED,
+      redToGone: DEFAULT_AGING_THRESHOLDS.RED_TO_GONE,
     },
-    agingEnabled: DEFAULT_AGING_TOGGLES.AGING_ENABLED,
-    tabSortingEnabled: DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
-    tabgroupSortingEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
-    tabgroupColoringEnabled: DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
-    showGroupAge: DEFAULT_SHOW_GROUP_AGE,
-    greenToYellowEnabled: DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
-    yellowToRedEnabled: DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
-    redToGoneEnabled: DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
-    yellowGroupName: DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
-    redGroupName: DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
+    agingEnabled: DEFAULT_AGING_FEATURE_TOGGLES.AGING_ENABLED,
+    tabSortingEnabled: DEFAULT_AGING_FEATURE_TOGGLES.TAB_SORTING_ENABLED,
+    tabgroupSortingEnabled: DEFAULT_AGING_FEATURE_TOGGLES.TABGROUP_SORTING_ENABLED,
+    tabgroupColoringEnabled: DEFAULT_AGING_FEATURE_TOGGLES.TABGROUP_COLORING_ENABLED,
+    showGroupAge: DEFAULT_SHOW_AGE_IN_GROUP_TITLES,
+    greenToYellowEnabled: DEFAULT_STATUS_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
+    yellowToRedEnabled: DEFAULT_STATUS_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
+    redToGoneEnabled: DEFAULT_STATUS_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
+    yellowGroupName: DEFAULT_MANAGED_GROUP_NAMES.YELLOW_GROUP_NAME,
+    redGroupName: DEFAULT_MANAGED_GROUP_NAMES.RED_GROUP_NAME,
     bookmarkEnabled: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED,
     bookmarkFolderName: DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME,
-    autoGroupEnabled: DEFAULT_AUTO_GROUP.ENABLED,
-    autoGroupNamingEnabled: DEFAULT_AUTO_GROUP_NAMING.ENABLED,
-    autoGroupNamingDelayMinutes: DEFAULT_AUTO_GROUP_NAMING.DELAY_MINUTES,
+    autoGroupEnabled: DEFAULT_AUTO_GROUPING_SETTINGS.ENABLED,
+    autoGroupNamingEnabled: DEFAULT_AUTO_NAMING_SETTINGS.ENABLED,
+    autoGroupNamingDelayMinutes: DEFAULT_AUTO_NAMING_SETTINGS.DELAY_MINUTES,
   };
 }
 
 // Simulate the v1→v2 migration logic from service-worker.js onInstalled handler
 async function runMigration() {
-  const state = await readState([STORAGE_KEYS.SCHEMA_VERSION, STORAGE_KEYS.SETTINGS]);
+  const state = await readValidatedStateFromStorage([STORAGE_KEYS.SCHEMA_VERSION, STORAGE_KEYS.SETTINGS]);
   const schemaVersion = state[STORAGE_KEYS.SCHEMA_VERSION];
   if (schemaVersion === 1) {
     const existing = state[STORAGE_KEYS.SETTINGS] || {};
     const migrated = {
       ...existing,
-      agingEnabled: existing.agingEnabled ?? DEFAULT_AGING_TOGGLES.AGING_ENABLED,
-      tabSortingEnabled: existing.tabSortingEnabled ?? DEFAULT_AGING_TOGGLES.TAB_SORTING_ENABLED,
-      tabgroupSortingEnabled: existing.tabgroupSortingEnabled ?? DEFAULT_AGING_TOGGLES.TABGROUP_SORTING_ENABLED,
-      tabgroupColoringEnabled: existing.tabgroupColoringEnabled ?? DEFAULT_AGING_TOGGLES.TABGROUP_COLORING_ENABLED,
-      greenToYellowEnabled: existing.greenToYellowEnabled ?? DEFAULT_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
-      yellowToRedEnabled: existing.yellowToRedEnabled ?? DEFAULT_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
-      redToGoneEnabled: existing.redToGoneEnabled ?? DEFAULT_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
-      yellowGroupName: existing.yellowGroupName ?? DEFAULT_GROUP_NAMES.YELLOW_GROUP_NAME,
-      redGroupName: existing.redGroupName ?? DEFAULT_GROUP_NAMES.RED_GROUP_NAME,
-      autoGroupEnabled: existing.autoGroupEnabled ?? DEFAULT_AUTO_GROUP.ENABLED,
+      agingEnabled: existing.agingEnabled ?? DEFAULT_AGING_FEATURE_TOGGLES.AGING_ENABLED,
+      tabSortingEnabled: existing.tabSortingEnabled ?? DEFAULT_AGING_FEATURE_TOGGLES.TAB_SORTING_ENABLED,
+      tabgroupSortingEnabled: existing.tabgroupSortingEnabled ?? DEFAULT_AGING_FEATURE_TOGGLES.TABGROUP_SORTING_ENABLED,
+      tabgroupColoringEnabled: existing.tabgroupColoringEnabled ?? DEFAULT_AGING_FEATURE_TOGGLES.TABGROUP_COLORING_ENABLED,
+      greenToYellowEnabled: existing.greenToYellowEnabled ?? DEFAULT_STATUS_TRANSITION_TOGGLES.GREEN_TO_YELLOW_ENABLED,
+      yellowToRedEnabled: existing.yellowToRedEnabled ?? DEFAULT_STATUS_TRANSITION_TOGGLES.YELLOW_TO_RED_ENABLED,
+      redToGoneEnabled: existing.redToGoneEnabled ?? DEFAULT_STATUS_TRANSITION_TOGGLES.RED_TO_GONE_ENABLED,
+      yellowGroupName: existing.yellowGroupName ?? DEFAULT_MANAGED_GROUP_NAMES.YELLOW_GROUP_NAME,
+      redGroupName: existing.redGroupName ?? DEFAULT_MANAGED_GROUP_NAMES.RED_GROUP_NAME,
+      autoGroupEnabled: existing.autoGroupEnabled ?? DEFAULT_AUTO_GROUPING_SETTINGS.ENABLED,
     };
-    await batchWrite({
+    await writeMultipleStateEntries({
       [STORAGE_KEYS.SCHEMA_VERSION]: 2,
       [STORAGE_KEYS.SETTINGS]: migrated,
     });
@@ -124,7 +124,7 @@ describe('settings-migration integration', () => {
   describe('v1 → v2 migration', () => {
     it('should add all new v2 fields with correct defaults to v1 settings', async () => {
       const v1Settings = buildV1Settings();
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: v1Settings,
       });
@@ -132,7 +132,7 @@ describe('settings-migration integration', () => {
       const result = await runMigration();
       expect(result.migrated).toBe(true);
 
-      const state = await readState([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.SCHEMA_VERSION]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.SCHEMA_VERSION]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // New v2 aging toggles — all default to true
@@ -159,7 +159,7 @@ describe('settings-migration integration', () => {
 
     it('should preserve all existing v1 fields after migration', async () => {
       const v1Settings = buildV1Settings({
-        timeMode: TIME_MODE.WALL_CLOCK,
+        timeMode: AGE_CALCULATION_MODE.WALL_CLOCK,
         thresholds: { greenToYellow: 1000, yellowToRed: 2000, redToGone: 3000 },
         showGroupAge: true,
         bookmarkEnabled: false,
@@ -167,18 +167,18 @@ describe('settings-migration integration', () => {
         autoGroupNamingEnabled: false,
         autoGroupNamingDelayMinutes: 10,
       });
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: v1Settings,
       });
 
       await runMigration();
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // All existing v1 fields preserved
-      expect(settings.timeMode).toBe(TIME_MODE.WALL_CLOCK);
+      expect(settings.timeMode).toBe(AGE_CALCULATION_MODE.WALL_CLOCK);
       expect(settings.thresholds.greenToYellow).toBe(1000);
       expect(settings.thresholds.yellowToRed).toBe(2000);
       expect(settings.thresholds.redToGone).toBe(3000);
@@ -195,14 +195,14 @@ describe('settings-migration integration', () => {
         agingEnabled: false,
         yellowGroupName: 'Stale',
       });
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: v1Settings,
       });
 
       await runMigration();
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // Pre-existing v2 fields preserved (nullish coalescing won't overwrite)
@@ -215,14 +215,14 @@ describe('settings-migration integration', () => {
     });
 
     it('should handle empty v1 settings object', async () => {
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: {},
       });
 
       await runMigration();
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // All v2 fields added with defaults
@@ -232,14 +232,14 @@ describe('settings-migration integration', () => {
     });
 
     it('should handle missing settings key in storage', async () => {
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         // No SETTINGS key at all
       });
 
       await runMigration();
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // Migration still succeeds with all defaults
@@ -255,7 +255,7 @@ describe('settings-migration integration', () => {
       const v2Settings = buildV2Defaults();
       v2Settings.agingEnabled = false;
       v2Settings.yellowGroupName = 'Custom';
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 2,
         [STORAGE_KEYS.SETTINGS]: v2Settings,
       });
@@ -264,14 +264,14 @@ describe('settings-migration integration', () => {
       expect(result.migrated).toBe(false);
 
       // Settings unchanged
-      const state = await readState([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.SCHEMA_VERSION]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.SCHEMA_VERSION]);
       expect(state[STORAGE_KEYS.SCHEMA_VERSION]).toBe(2);
       expect(state[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
       expect(state[STORAGE_KEYS.SETTINGS].yellowGroupName).toBe('Custom');
     });
 
     it('should be safe to run migration twice on v1', async () => {
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: buildV1Settings(),
       });
@@ -281,7 +281,7 @@ describe('settings-migration integration', () => {
       const secondResult = await runMigration();
       expect(secondResult.migrated).toBe(false);
 
-      const state = await readState([STORAGE_KEYS.SCHEMA_VERSION]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SCHEMA_VERSION]);
       expect(state[STORAGE_KEYS.SCHEMA_VERSION]).toBe(2);
     });
   });
@@ -289,12 +289,12 @@ describe('settings-migration integration', () => {
   describe('fresh install (v2 defaults)', () => {
     it('should produce complete v2 defaults for fresh install', async () => {
       const defaults = buildV2Defaults();
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 2,
         [STORAGE_KEYS.SETTINGS]: defaults,
       });
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       // Verify every v2 field is present
@@ -327,7 +327,7 @@ describe('settings-migration integration', () => {
 
   describe('data integrity after migration', () => {
     it('should produce settings that pass through storage round-trip unchanged', async () => {
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: buildV1Settings(),
       });
@@ -335,22 +335,22 @@ describe('settings-migration integration', () => {
       await runMigration();
 
       // Read, write back, read again
-      const first = await readState([STORAGE_KEYS.SETTINGS]);
-      await batchWrite({ [STORAGE_KEYS.SETTINGS]: first[STORAGE_KEYS.SETTINGS] });
-      const second = await readState([STORAGE_KEYS.SETTINGS]);
+      const first = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
+      await writeMultipleStateEntries({ [STORAGE_KEYS.SETTINGS]: first[STORAGE_KEYS.SETTINGS] });
+      const second = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
       expect(second[STORAGE_KEYS.SETTINGS]).toEqual(first[STORAGE_KEYS.SETTINGS]);
     });
 
     it('should not introduce undefined or null for any new v2 field', async () => {
-      await batchWrite({
+      await writeMultipleStateEntries({
         [STORAGE_KEYS.SCHEMA_VERSION]: 1,
         [STORAGE_KEYS.SETTINGS]: buildV1Settings(),
       });
 
       await runMigration();
 
-      const state = await readState([STORAGE_KEYS.SETTINGS]);
+      const state = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
       const settings = state[STORAGE_KEYS.SETTINGS];
 
       const v2Fields = [

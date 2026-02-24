@@ -1,16 +1,25 @@
-export const STATUS = Object.freeze({
+/**
+ * Constants that define the core configuration of the TabCycle extension.
+ * Every value here controls some aspect of how tabs age, transition,
+ * get grouped, get bookmarked, or get stored.
+ */
+
+/** The four stages a tab passes through during its lifecycle. */
+export const TAB_LIFECYCLE_STAGE = Object.freeze({
   GREEN: 'green',
   YELLOW: 'yellow',
   RED: 'red',
   GONE: 'gone',
 });
 
-export const DEFAULT_THRESHOLDS = Object.freeze({
-  GREEN_TO_YELLOW: 4 * 60 * 60 * 1000,   // 4 hours in ms
-  YELLOW_TO_RED: 8 * 60 * 60 * 1000,      // 8 hours in ms
-  RED_TO_GONE: 24 * 60 * 60 * 1000,       // 24 hours in ms
+/** Default time thresholds (in milliseconds) that control when tabs transition between lifecycle stages. */
+export const DEFAULT_AGING_THRESHOLDS = Object.freeze({
+  GREEN_TO_YELLOW: 4 * 60 * 60 * 1000,   // 4 hours
+  YELLOW_TO_RED: 8 * 60 * 60 * 1000,      // 8 hours
+  RED_TO_GONE: 24 * 60 * 60 * 1000,       // 24 hours
 });
 
+/** Keys used to persist extension state in chrome.storage.local. */
 export const STORAGE_KEYS = Object.freeze({
   SCHEMA_VERSION: 'v1_schemaVersion',
   SETTINGS: 'v1_settings',
@@ -20,55 +29,68 @@ export const STORAGE_KEYS = Object.freeze({
   BOOKMARK_STATE: 'v1_bookmarkState',
 });
 
-export const ALARM_NAME = 'tabcycle-eval';
-export const ALARM_PERIOD_MINUTES = 0.5; // 30 seconds
+/** Name of the Chrome alarm that triggers the periodic evaluation cycle. */
+export const EVALUATION_ALARM_NAME = 'tabcycle-eval';
 
+/** How often (in minutes) the evaluation cycle alarm fires. 0.5 = every 30 seconds. */
+export const EVALUATION_INTERVAL_MINUTES = 0.5;
+
+/** Default settings for bookmarking tabs before they are closed. */
 export const DEFAULT_BOOKMARK_SETTINGS = Object.freeze({
   BOOKMARK_ENABLED: true,
   BOOKMARK_FOLDER_NAME: 'Closed Tabs',
 });
 
-export const DEFAULT_AUTO_GROUP_NAMING = Object.freeze({
+/** Default settings for automatically naming unnamed tab groups. */
+export const DEFAULT_AUTO_NAMING_SETTINGS = Object.freeze({
   ENABLED: true,
   DELAY_MINUTES: 5,
 });
 
-export const DEFAULT_SHOW_GROUP_AGE = false;
+/** Whether to show each group's age as a suffix in its title (e.g. "(2h)"). */
+export const DEFAULT_SHOW_AGE_IN_GROUP_TITLES = false;
 
-export const DEFAULT_AGING_TOGGLES = Object.freeze({
+/** Default on/off state for aging-related features. */
+export const DEFAULT_AGING_FEATURE_TOGGLES = Object.freeze({
   AGING_ENABLED: true,
   TAB_SORTING_ENABLED: true,
   TABGROUP_SORTING_ENABLED: true,
   TABGROUP_COLORING_ENABLED: true,
 });
 
-export const DEFAULT_TRANSITION_TOGGLES = Object.freeze({
+/** Default on/off state for each lifecycle transition. Disabling an earlier transition blocks all later ones. */
+export const DEFAULT_STATUS_TRANSITION_TOGGLES = Object.freeze({
   GREEN_TO_YELLOW_ENABLED: true,
   YELLOW_TO_RED_ENABLED: true,
   RED_TO_GONE_ENABLED: true,
 });
 
-export const DEFAULT_GROUP_NAMES = Object.freeze({
+/** Default titles for the extension-managed yellow and red tab groups. Empty string means no visible title. */
+export const DEFAULT_MANAGED_GROUP_NAMES = Object.freeze({
   YELLOW_GROUP_NAME: '',
   RED_GROUP_NAME: '',
 });
 
-export const DEFAULT_AUTO_GROUP = Object.freeze({
+/** Default settings for automatic tab grouping behavior. */
+export const DEFAULT_AUTO_GROUPING_SETTINGS = Object.freeze({
   ENABLED: true,
 });
 
-export const BOOKMARK_BLOCKED_URLS = Object.freeze([
+/** URLs that should never be bookmarked (empty pages, new-tab, etc). */
+export const URLS_EXCLUDED_FROM_BOOKMARKING = Object.freeze([
   '',
   'chrome://newtab',
   'chrome://newtab/',
   'about:blank',
 ]);
 
-export const TIME_MODE = Object.freeze({
+/** How tab age is calculated: either from active browser usage time, or from wall-clock time. */
+export const AGE_CALCULATION_MODE = Object.freeze({
   ACTIVE: 'active',
   WALL_CLOCK: 'wallclock',
 });
 
+/** Structured error codes for logging and diagnostics. */
 export const ERROR_CODES = Object.freeze({
   ERR_STORAGE_READ: 'ERR_STORAGE_READ',
   ERR_STORAGE_WRITE: 'ERR_STORAGE_WRITE',
@@ -85,7 +107,8 @@ export const ERROR_CODES = Object.freeze({
   ERR_BOOKMARK_RENAME: 'ERR_BOOKMARK_RENAME',
 });
 
-export const SPECIAL_GROUP_TYPES = Object.freeze({
+/** The two types of extension-managed tab groups: yellow (aging) and red (old). */
+export const MANAGED_GROUP_TYPES = Object.freeze({
   YELLOW: 'yellow',
   RED: 'red',
 });

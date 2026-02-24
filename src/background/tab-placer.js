@@ -1,25 +1,32 @@
+/**
+ * Places newly created tabs according to context-aware grouping rules.
+ *
+ * When a new tab is opened, this module decides where it goes based on
+ * the "context tab" — the tab that was active when the new one was created
+ * (identified by openerTabId).
+ *
+ * Placement rules:
+ *   1. Context tab is in a user group → add new tab to that group, right of context
+ *   2. Context tab is ungrouped & unpinned → group both into a new green group
+ *   3. All other cases (pinned, managed group, no context) → move to leftmost position
+ */
+
 import { createLogger } from '../shared/logger.js';
 import { ERROR_CODES } from '../shared/constants.js';
-import { isSpecialGroup, trackExtensionGroup } from './group-manager.js';
+import { isManagedAgingGroup, markGroupAsCreatedByExtension } from './group-manager.js';
 
 const logger = createLogger('background');
 
 /**
- * Place a newly created tab according to context rules.
+ * Places a newly created tab near the tab that opened it.
  *
- * The "context tab" is the tab that was active before the new tab was created.
- * We find it via `newTab.openerTabId` (set by Chrome for Ctrl+T / Cmd+T and
- * link-opened tabs) rather than querying the active tab, because Chrome has
- * already switched focus to the new tab by the time `onCreated` fires.
- *
- * Rules:
- *   1. Context tab is in a user group → move new tab to right of context tab in that group
- *   2. Context tab is ungrouped & unpinned → group both into a new tab group (color = green)
- *   3. All other cases (pinned, special-group, no context tab) → leftmost position
+ * @param {chrome.tabs.Tab} newTab - The newly created tab
+ * @param {number} windowId - The window the tab was created in
+ * @param {object} tabMeta - All tab metadata entries (may be mutated with group info)
+ * @param {object} windowState - Per-window state (for checking managed groups)
+ * @param {object} settings - User settings (for autoGroupEnabled check)
  */
-export async function placeNewTab(newTab, windowId, tabMeta, windowState, settings) {
-  // When auto-grouping is disabled, skip the entire placement logic.
-  // New tabs open at Chrome's default position without being grouped.
+export async function placeNewlyCreatedTabNearItsContext(newTab, windowId, tabMeta, windowState, settings) {
   if (settings?.autoGroupEnabled === false) {
     logger.debug('Auto-grouping disabled, skipping tab placement', { newTabId: newTab.id, windowId });
     return;
@@ -36,88 +43,87 @@ export async function placeNewTab(newTab, windowId, tabMeta, windowState, settin
       }
     }
 
-    // --- Case 3 fallback: no context tab → leftmost ---
+    // No context tab → move to far left
     if (!contextTab) {
       await chrome.tabs.move(newTab.id, { index: 0 });
       logger.debug('New tab moved to far left (no context tab)', { newTabId: newTab.id, windowId });
       return;
     }
 
-    // --- Case 3: context tab is pinned → leftmost ---
+    // Context tab is pinned → move to far left
     if (contextTab.pinned) {
       await chrome.tabs.move(newTab.id, { index: 0 });
       logger.debug('New tab moved to far left (context tab pinned)', { newTabId: newTab.id, contextTabId: contextTab.id });
       return;
     }
 
-    const contextGroupId = contextTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+    const contextTabGroupId = contextTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
       ? contextTab.groupId
       : null;
 
-    // --- Case 3: context tab is in a special group → leftmost ---
-    if (contextGroupId !== null && isSpecialGroup(contextGroupId, windowId, windowState)) {
+    // Context tab is in a managed aging group → move to far left
+    if (contextTabGroupId !== null && isManagedAgingGroup(contextTabGroupId, windowId, windowState)) {
       await chrome.tabs.move(newTab.id, { index: 0 });
       logger.debug('New tab moved to far left (context in special group)', {
         newTabId: newTab.id,
         contextTabId: contextTab.id,
-        specialGroupId: contextGroupId,
+        specialGroupId: contextTabGroupId,
       });
       return;
     }
 
-    // --- Case 1: context tab is in a user group → add new tab to same group, right of context ---
-    if (contextGroupId !== null) {
+    // Context tab is in a user group → add new tab to same group, right of context
+    if (contextTabGroupId !== null) {
       try {
-        await chrome.tabs.group({ tabIds: [newTab.id], groupId: contextGroupId });
+        await chrome.tabs.group({ tabIds: [newTab.id], groupId: contextTabGroupId });
         await chrome.tabs.move(newTab.id, { index: contextTab.index + 1 });
         logger.debug('New tab added to context tab group, right of context', {
           newTabId: newTab.id,
-          groupId: contextGroupId,
+          groupId: contextTabGroupId,
         });
-      } catch (groupErr) {
-        // Group may have been removed between query and group call — fall back to leftmost
+      } catch (groupError) {
         logger.warn('Failed to add to context group, moving to far left', {
           newTabId: newTab.id,
-          groupId: contextGroupId,
-          error: groupErr.message,
+          groupId: contextTabGroupId,
+          error: groupError.message,
         });
         await chrome.tabs.move(newTab.id, { index: 0 });
       }
       return;
     }
 
-    // --- Case 2: context tab is ungrouped & unpinned → group both, set green color ---
-    const groupId = await chrome.tabs.group({
+    // Context tab is ungrouped & unpinned → group both into a new green group
+    const newGroupId = await chrome.tabs.group({
       tabIds: [contextTab.id, newTab.id],
       createProperties: { windowId },
     });
-    await chrome.tabGroups.update(groupId, { title: '', color: 'green' });
-    trackExtensionGroup(groupId);
+    await chrome.tabGroups.update(newGroupId, { title: '', color: 'green' });
+    markGroupAsCreatedByExtension(newGroupId);
 
-    // Update tab meta for the context tab to reflect the new group
-    const contextMeta = tabMeta[contextTab.id] || tabMeta[String(contextTab.id)];
-    if (contextMeta) {
-      contextMeta.groupId = groupId;
-      contextMeta.isSpecialGroup = false;
+    // Update metadata for context tab to reflect the new group
+    const contextTabMetadata = tabMeta[contextTab.id] || tabMeta[String(contextTab.id)];
+    if (contextTabMetadata) {
+      contextTabMetadata.groupId = newGroupId;
+      contextTabMetadata.isSpecialGroup = false;
     }
 
-    // Update new tab meta to reflect the new group
-    const newMeta = tabMeta[newTab.id] || tabMeta[String(newTab.id)];
-    if (newMeta) {
-      newMeta.groupId = groupId;
-      newMeta.isSpecialGroup = false;
+    // Update metadata for new tab to reflect the new group
+    const newTabMetadata = tabMeta[newTab.id] || tabMeta[String(newTab.id)];
+    if (newTabMetadata) {
+      newTabMetadata.groupId = newGroupId;
+      newTabMetadata.isSpecialGroup = false;
     }
 
     logger.debug('Created new group for context + new tab, color green', {
       newTabId: newTab.id,
       contextTabId: contextTab.id,
-      groupId,
+      groupId: newGroupId,
     });
-  } catch (err) {
+  } catch (error) {
     logger.error('Failed to place new tab', {
       newTabId: newTab.id,
       windowId,
-      error: err.message,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_TAB_MOVE,
     });
   }

@@ -50,23 +50,23 @@ globalThis.chrome = {
 };
 
 const {
-  ensureSpecialGroup,
-  removeSpecialGroupIfEmpty,
-  isSpecialGroup,
-  moveTabToSpecialGroup,
-  dissolveUnnamedSingleTabGroups,
-  dissolveSpecialGroups,
-  updateGroupColor,
-  parseGroupTitle,
-  composeGroupTitle,
-  isBaseGroupNameEmpty,
-  stripAgeSuffix,
-  autoNameEligibleGroups,
-  applyUserEditLock,
-  consumeExpectedExtensionTitleUpdate,
-  consumeExpectedExtensionColorUpdate,
-  trackExtensionGroup,
-  untrackExtensionGroup,
+  ensureManagedGroupExists,
+  removeManagedGroupIfEmpty,
+  isManagedAgingGroup,
+  moveTabToManagedGroup,
+  dissolveUnnamedGroupsWithOnlyOneTab,
+  dissolveManagedGroupsInWindow,
+  updateGroupColorToMatchStatus,
+  separateGroupTitleFromAgeSuffix,
+  combineGroupTitleWithAgeSuffix,
+  hasNoUserGivenName,
+  removeAgeSuffixFromTitle,
+  autoNameUnnamedGroupsWhenReady,
+  lockAutoNamingAfterUserEdit,
+  acknowledgeExtensionTitleChangeIfExpected,
+  acknowledgeExtensionColorChangeIfExpected,
+  markGroupAsCreatedByExtension,
+  unmarkGroupAsCreatedByExtension,
 } = await import('../../src/background/group-manager.js');
 
 describe('group-manager', () => {
@@ -97,42 +97,42 @@ describe('group-manager', () => {
     ));
   });
 
-  describe('isSpecialGroup', () => {
+  describe('isManagedAgingGroup', () => {
     it('should return true for a yellow special group', () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: null }, groupZones: {} },
       };
-      expect(isSpecialGroup(5, 1, windowState)).toBe(true);
+      expect(isManagedAgingGroup(5, 1, windowState)).toBe(true);
     });
 
     it('should return true for a red special group', () => {
       const windowState = {
         1: { specialGroups: { yellow: null, red: 10 }, groupZones: {} },
       };
-      expect(isSpecialGroup(10, 1, windowState)).toBe(true);
+      expect(isManagedAgingGroup(10, 1, windowState)).toBe(true);
     });
 
     it('should return false for a non-special group', () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: 10 }, groupZones: {} },
       };
-      expect(isSpecialGroup(99, 1, windowState)).toBe(false);
+      expect(isManagedAgingGroup(99, 1, windowState)).toBe(false);
     });
 
     it('should return false when window has no state', () => {
       const windowState = {};
-      expect(isSpecialGroup(5, 1, windowState)).toBe(false);
+      expect(isManagedAgingGroup(5, 1, windowState)).toBe(false);
     });
 
     it('should return false for null groupId', () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: 10 }, groupZones: {} },
       };
-      expect(isSpecialGroup(null, 1, windowState)).toBe(false);
+      expect(isManagedAgingGroup(null, 1, windowState)).toBe(false);
     });
   });
 
-  describe('ensureSpecialGroup', () => {
+  describe('ensureManagedGroupExists', () => {
     it('should return existing group ID if already present', async () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: null }, groupZones: {} },
@@ -140,7 +140,7 @@ describe('group-manager', () => {
       // Mock that group 5 still exists
       mockTabs.push({ id: 10, groupId: 5, windowId: 1 });
 
-      const result = await ensureSpecialGroup(1, 'yellow', windowState);
+      const result = await ensureManagedGroupExists(1, 'yellow', windowState);
       expect(result.groupId).toBe(5);
       expect(chrome.tabs.group).not.toHaveBeenCalled();
     });
@@ -152,7 +152,7 @@ describe('group-manager', () => {
       // Need a tab to create a group with
       chrome.tabs.group.mockResolvedValueOnce(100);
 
-      const result = await ensureSpecialGroup(1, 'yellow', windowState, 42);
+      const result = await ensureManagedGroupExists(1, 'yellow', windowState, 42);
       expect(chrome.tabs.group).toHaveBeenCalled();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(100, expect.objectContaining({
         title: '',
@@ -168,7 +168,7 @@ describe('group-manager', () => {
       };
       chrome.tabs.group.mockResolvedValueOnce(101);
 
-      const result = await ensureSpecialGroup(1, 'red', windowState, 43);
+      const result = await ensureManagedGroupExists(1, 'red', windowState, 43);
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(101, expect.objectContaining({
         title: '',
         color: 'red',
@@ -178,14 +178,14 @@ describe('group-manager', () => {
     });
   });
 
-  describe('removeSpecialGroupIfEmpty', () => {
+  describe('removeManagedGroupIfEmpty', () => {
     it('should remove group reference when group is empty', async () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: null }, groupZones: {} },
       };
       chrome.tabs.query.mockResolvedValueOnce([]); // no tabs in group
 
-      const result = await removeSpecialGroupIfEmpty(1, 'yellow', windowState);
+      const result = await removeManagedGroupIfEmpty(1, 'yellow', windowState);
       expect(result.removed).toBe(true);
       expect(windowState[1].specialGroups.yellow).toBeNull();
     });
@@ -196,7 +196,7 @@ describe('group-manager', () => {
       };
       chrome.tabs.query.mockResolvedValueOnce([{ id: 10, groupId: 5 }]);
 
-      const result = await removeSpecialGroupIfEmpty(1, 'yellow', windowState);
+      const result = await removeManagedGroupIfEmpty(1, 'yellow', windowState);
       expect(result.removed).toBe(false);
       expect(windowState[1].specialGroups.yellow).toBe(5);
     });
@@ -206,20 +206,20 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await removeSpecialGroupIfEmpty(1, 'yellow', windowState);
+      const result = await removeManagedGroupIfEmpty(1, 'yellow', windowState);
       expect(result.removed).toBe(false);
       expect(chrome.tabs.query).not.toHaveBeenCalled();
     });
   });
 
-  describe('moveTabToSpecialGroup', () => {
+  describe('moveTabToManagedGroup', () => {
     it('should move tab to existing special group', async () => {
       const windowState = {
         1: { specialGroups: { yellow: 5, red: null }, groupZones: {} },
       };
       mockTabs.push({ id: 10, groupId: 5, windowId: 1 }); // group exists
 
-      await moveTabToSpecialGroup(42, 'yellow', 1, windowState);
+      await moveTabToManagedGroup(42, 'yellow', 1, windowState);
       expect(chrome.tabs.group).toHaveBeenCalledWith(expect.objectContaining({
         tabIds: [42],
         groupId: 5,
@@ -238,7 +238,7 @@ describe('group-manager', () => {
       chrome.tabs.group.mockResolvedValueOnce(200);
       chrome.tabGroups.update.mockResolvedValueOnce({ id: 200, title: 'Yellow', color: 'yellow' });
 
-      const result = await moveTabToSpecialGroup(42, 'yellow', 1, windowState);
+      const result = await moveTabToManagedGroup(42, 'yellow', 1, windowState);
 
       expect(result).toEqual({ success: true, groupId: 200 });
       expect(windowState[1].specialGroups.yellow).toBe(200);
@@ -258,15 +258,15 @@ describe('group-manager', () => {
       chrome.tabs.group.mockResolvedValueOnce(200); // creation call
       chrome.tabs.group.mockResolvedValueOnce(200); // move call (won't happen separately since creation includes tab)
 
-      await moveTabToSpecialGroup(42, 'yellow', 1, windowState);
+      await moveTabToManagedGroup(42, 'yellow', 1, windowState);
       // Should have called group at least once
       expect(chrome.tabs.group).toHaveBeenCalled();
     });
   });
 
-  describe('dissolveUnnamedSingleTabGroups', () => {
+  describe('dissolveUnnamedGroupsWithOnlyOneTab', () => {
     it('should ungroup the sole tab in an extension-created unnamed group', async () => {
-      trackExtensionGroup(5);
+      markGroupAsCreatedByExtension(5);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -276,20 +276,20 @@ describe('group-manager', () => {
       chrome.tabs.query.mockResolvedValueOnce([{ id: 10, groupId: 5, windowId: 1 }]);
 
       const tabMeta = {
-        10: { tabId: 10, windowId: 1, groupId: 5, isSpecialGroup: false, pinned: false },
+        10: { tabId: 10, windowId: 1, groupId: 5, isManagedAgingGroup: false, pinned: false },
       };
       const windowState = {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(1);
       expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
       expect(tabMeta[10].groupId).toBeNull();
     });
 
     it('should NOT dissolve a named group with one tab even if tracked', async () => {
-      trackExtensionGroup(5);
+      markGroupAsCreatedByExtension(5);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -302,14 +302,14 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
-      untrackExtensionGroup(5);
+      unmarkGroupAsCreatedByExtension(5);
     });
 
     it('should NOT dissolve an unnamed group with multiple tabs', async () => {
-      trackExtensionGroup(5);
+      markGroupAsCreatedByExtension(5);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -326,10 +326,10 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
-      untrackExtensionGroup(5);
+      unmarkGroupAsCreatedByExtension(5);
     });
 
     it('should NOT dissolve a user-created unnamed single-tab group', async () => {
@@ -346,13 +346,13 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
     });
 
     it('should dissolve a group whose only title is an age suffix like "(1m)"', async () => {
-      trackExtensionGroup(5);
+      markGroupAsCreatedByExtension(5);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -362,20 +362,20 @@ describe('group-manager', () => {
       chrome.tabs.query.mockResolvedValueOnce([{ id: 10, groupId: 5, windowId: 1 }]);
 
       const tabMeta = {
-        10: { tabId: 10, windowId: 1, groupId: 5, isSpecialGroup: false, pinned: false },
+        10: { tabId: 10, windowId: 1, groupId: 5, isManagedAgingGroup: false, pinned: false },
       };
       const windowState = {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(1);
       expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
       expect(tabMeta[10].groupId).toBeNull();
     });
 
     it('should dissolve a group with age suffix "(2h)" as title', async () => {
-      trackExtensionGroup(6);
+      markGroupAsCreatedByExtension(6);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -385,19 +385,19 @@ describe('group-manager', () => {
       chrome.tabs.query.mockResolvedValueOnce([{ id: 11, groupId: 6, windowId: 1 }]);
 
       const tabMeta = {
-        11: { tabId: 11, windowId: 1, groupId: 6, isSpecialGroup: false, pinned: false },
+        11: { tabId: 11, windowId: 1, groupId: 6, isManagedAgingGroup: false, pinned: false },
       };
       const windowState = {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(1);
       expect(chrome.tabs.ungroup).toHaveBeenCalledWith(11);
     });
 
     it('should NOT dissolve a named group even if it has an age suffix', async () => {
-      trackExtensionGroup(5);
+      markGroupAsCreatedByExtension(5);
       chrome.tabGroups = {
         ...chrome.tabGroups,
         query: jest.fn(async () => [
@@ -410,10 +410,10 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
-      untrackExtensionGroup(5);
+      unmarkGroupAsCreatedByExtension(5);
     });
 
     it('should NOT dissolve special groups', async () => {
@@ -430,7 +430,7 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveUnnamedSingleTabGroups(1, tabMeta, windowState);
+      const result = await dissolveUnnamedGroupsWithOnlyOneTab(1, tabMeta, windowState);
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
     });
@@ -454,7 +454,7 @@ describe('group-manager', () => {
         },
       };
 
-      const result = applyUserEditLock(1, { id: 7, title: '(2m)' }, windowState, 15_000, now);
+      const result = lockAutoNamingAfterUserEdit(1, { id: 7, title: '(2m)' }, windowState, 15_000, now);
       expect(result.locked).toBe(true);
       expect(windowState[1].groupNaming[7].firstUnnamedSeenAt).toBe(now - 6000);
       expect(windowState[1].groupNaming[7].userEditLockUntil).toBeGreaterThan(now);
@@ -477,13 +477,13 @@ describe('group-manager', () => {
         },
       };
 
-      const result = applyUserEditLock(1, { id: 8, title: 'My Group (2m)' }, windowState, 15_000, now);
+      const result = lockAutoNamingAfterUserEdit(1, { id: 8, title: 'My Group (2m)' }, windowState, 15_000, now);
       expect(result.locked).toBe(false);
       expect(windowState[1].groupNaming[8]).toBeUndefined();
     });
   });
 
-  describe('autoNameEligibleGroups', () => {
+  describe('autoNameUnnamedGroupsWhenReady', () => {
     it('should auto-name an eligible unnamed group after delay and preserve age suffix', async () => {
       const now = Date.now();
       mockGroups.push({ id: 30, windowId: 1, title: '(6m)', color: 'green' });
@@ -507,7 +507,7 @@ describe('group-manager', () => {
         },
       };
 
-      const summary = await autoNameEligibleGroups(1, {}, windowState, {
+      const summary = await autoNameUnnamedGroupsWhenReady(1, {}, windowState, {
         enabled: true,
         delayMinutes: 5,
         nowMs: now,
@@ -516,7 +516,7 @@ describe('group-manager', () => {
       expect(summary.named).toBe(1);
       const group = mockGroups.find((g) => g.id === 30);
       expect(group.title).toMatch(/\(\d+[mhd]\)$/);
-      const baseName = stripAgeSuffix(group.title);
+      const baseName = removeAgeSuffixFromTitle(group.title);
       expect(baseName.length).toBeGreaterThan(0);
       expect(baseName.split(/\s+/).length).toBeLessThanOrEqual(2);
     });
@@ -543,7 +543,7 @@ describe('group-manager', () => {
         },
       };
 
-      const summary = await autoNameEligibleGroups(1, {}, windowState, {
+      const summary = await autoNameUnnamedGroupsWhenReady(1, {}, windowState, {
         enabled: true,
         delayMinutes: 5,
         nowMs: now,
@@ -580,7 +580,7 @@ describe('group-manager', () => {
       };
 
       try {
-        const summary = await autoNameEligibleGroups(1, {}, windowState, {
+        const summary = await autoNameUnnamedGroupsWhenReady(1, {}, windowState, {
           enabled: true,
           delayMinutes: 5,
           nowMs: now,
@@ -616,7 +616,7 @@ describe('group-manager', () => {
         },
       };
 
-      await autoNameEligibleGroups(1, {}, windowState, {
+      await autoNameUnnamedGroupsWhenReady(1, {}, windowState, {
         enabled: true,
         delayMinutes: 5,
         nowMs: now,
@@ -624,54 +624,54 @@ describe('group-manager', () => {
 
       const group = mockGroups.find((g) => g.id === 33);
       expect(group).toBeDefined();
-      expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(true);
-      expect(consumeExpectedExtensionTitleUpdate(33, group.title)).toBe(false);
+      expect(acknowledgeExtensionTitleChangeIfExpected(33, group.title)).toBe(true);
+      expect(acknowledgeExtensionTitleChangeIfExpected(33, group.title)).toBe(false);
     });
   });
 
   describe('extension update filtering', () => {
     it('should mark extension color updates for onUpdated filtering', async () => {
       mockGroups.push({ id: 61, windowId: 1, title: '', color: 'grey' });
-      await updateGroupColor(61, 'yellow');
+      await updateGroupColorToMatchStatus(61, 'yellow');
 
-      expect(consumeExpectedExtensionColorUpdate(61, 'yellow')).toBe(true);
-      expect(consumeExpectedExtensionColorUpdate(61, 'yellow')).toBe(false);
+      expect(acknowledgeExtensionColorChangeIfExpected(61, 'yellow')).toBe(true);
+      expect(acknowledgeExtensionColorChangeIfExpected(61, 'yellow')).toBe(false);
     });
   });
 
   describe('group title parsing and composition', () => {
     it('should parse base name and age suffix from titled groups', () => {
-      expect(parseGroupTitle('News (23m)')).toEqual({ baseName: 'News', ageSuffix: '(23m)' });
+      expect(separateGroupTitleFromAgeSuffix('News (23m)')).toEqual({ baseName: 'News', ageSuffix: '(23m)' });
     });
 
     it('should treat age-only title as empty base name', () => {
-      expect(parseGroupTitle('(5m)')).toEqual({ baseName: '', ageSuffix: '(5m)' });
-      expect(isBaseGroupNameEmpty('(5m)')).toBe(true);
+      expect(separateGroupTitleFromAgeSuffix('(5m)')).toEqual({ baseName: '', ageSuffix: '(5m)' });
+      expect(hasNoUserGivenName('(5m)')).toBe(true);
     });
 
     it('should keep non-age titles intact', () => {
-      expect(parseGroupTitle('Project Alpha')).toEqual({ baseName: 'Project Alpha', ageSuffix: '' });
-      expect(isBaseGroupNameEmpty('Project Alpha')).toBe(false);
+      expect(separateGroupTitleFromAgeSuffix('Project Alpha')).toEqual({ baseName: 'Project Alpha', ageSuffix: '' });
+      expect(hasNoUserGivenName('Project Alpha')).toBe(false);
     });
 
     it('should compose titles deterministically from base + suffix', () => {
-      expect(composeGroupTitle('News', '(2h)')).toBe('News (2h)');
-      expect(composeGroupTitle('', '(2h)')).toBe('(2h)');
-      expect(composeGroupTitle('News', '')).toBe('News');
+      expect(combineGroupTitleWithAgeSuffix('News', '(2h)')).toBe('News (2h)');
+      expect(combineGroupTitleWithAgeSuffix('', '(2h)')).toBe('(2h)');
+      expect(combineGroupTitleWithAgeSuffix('News', '')).toBe('News');
     });
 
     it('should be idempotent for parse + compose', () => {
       const original = 'Engineering (3d)';
-      const parsed = parseGroupTitle(original);
-      const rebuilt = composeGroupTitle(parsed.baseName, parsed.ageSuffix);
+      const parsed = separateGroupTitleFromAgeSuffix(original);
+      const rebuilt = combineGroupTitleWithAgeSuffix(parsed.baseName, parsed.ageSuffix);
       expect(rebuilt).toBe(original);
-      expect(stripAgeSuffix(rebuilt)).toBe('Engineering');
+      expect(removeAgeSuffixFromTitle(rebuilt)).toBe('Engineering');
     });
   });
 
-  // ─── v2: dissolveSpecialGroups ─────────────────────────────────────────────
+  // ─── v2: dissolveManagedGroupsInWindow ─────────────────────────────────────────────
 
-  describe('dissolveSpecialGroups', () => {
+  describe('dissolveManagedGroupsInWindow', () => {
     it('should ungroup all tabs in yellow and red special groups', async () => {
       mockTabs.push(
         { id: 10, groupId: 50, windowId: 1 },
@@ -688,7 +688,7 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: 50, red: 60 }, groupZones: {} },
       };
 
-      const result = await dissolveSpecialGroups(1, windowState);
+      const result = await dissolveManagedGroupsInWindow(1, windowState);
 
       expect(result.dissolved).toBe(2);
       expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
@@ -703,7 +703,7 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveSpecialGroups(1, windowState);
+      const result = await dissolveManagedGroupsInWindow(1, windowState);
 
       expect(result.dissolved).toBe(0);
       expect(chrome.tabs.ungroup).not.toHaveBeenCalled();
@@ -719,7 +719,7 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await dissolveSpecialGroups(1, windowState);
+      const result = await dissolveManagedGroupsInWindow(1, windowState);
 
       expect(result.dissolved).toBe(1);
       expect(chrome.tabs.ungroup).toHaveBeenCalledWith(10);
@@ -729,21 +729,21 @@ describe('group-manager', () => {
     it('should return 0 dissolved for unknown windowId', async () => {
       const windowState = {};
 
-      const result = await dissolveSpecialGroups(999, windowState);
+      const result = await dissolveManagedGroupsInWindow(999, windowState);
       expect(result.dissolved).toBe(0);
     });
   });
 
-  // ─── v2: ensureSpecialGroup with settings (group names from settings) ──────
+  // ─── v2: ensureManagedGroupExists with settings (group names from settings) ──────
 
-  describe('ensureSpecialGroup with settings', () => {
+  describe('ensureManagedGroupExists with settings', () => {
     it('should use yellowGroupName from settings when creating yellow group', async () => {
       const windowState = {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
       const settings = { yellowGroupName: 'Aging Tabs', redGroupName: '' };
-      const result = await ensureSpecialGroup(1, 'yellow', windowState, 42, settings);
+      const result = await ensureManagedGroupExists(1, 'yellow', windowState, 42, settings);
 
       expect(result.groupId).toBeDefined();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
@@ -758,7 +758,7 @@ describe('group-manager', () => {
       };
 
       const settings = { yellowGroupName: '', redGroupName: 'Old Tabs' };
-      const result = await ensureSpecialGroup(1, 'red', windowState, 43, settings);
+      const result = await ensureManagedGroupExists(1, 'red', windowState, 43, settings);
 
       expect(result.groupId).toBeDefined();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
@@ -773,7 +773,7 @@ describe('group-manager', () => {
       };
 
       const settings = { yellowGroupName: '', redGroupName: '' };
-      const result = await ensureSpecialGroup(1, 'yellow', windowState, 44, settings);
+      const result = await ensureManagedGroupExists(1, 'yellow', windowState, 44, settings);
 
       expect(result.groupId).toBeDefined();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({
@@ -787,7 +787,7 @@ describe('group-manager', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await ensureSpecialGroup(1, 'yellow', windowState, 45, undefined);
+      const result = await ensureManagedGroupExists(1, 'yellow', windowState, 45, undefined);
 
       expect(result.groupId).toBeDefined();
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(result.groupId, expect.objectContaining({

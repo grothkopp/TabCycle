@@ -1,61 +1,97 @@
-import { STATUS } from '../shared/constants.js';
+/**
+ * Creates and updates per-tab metadata entries.
+ *
+ * Each tab in the browser has a corresponding metadata entry that tracks
+ * when it was last refreshed (by navigation or focus), what lifecycle
+ * stage it's in, and which group it belongs to.
+ */
 
-const TAB_GROUP_ID_NONE = -1;
+import { TAB_LIFECYCLE_STAGE } from '../shared/constants.js';
 
-export function createTabEntry(tab, activeTimeMs) {
+/** Chrome's sentinel value meaning "this tab is not in any group". */
+const CHROME_UNGROUPED_TAB_SENTINEL = -1;
+
+/**
+ * Creates a fresh metadata entry for a newly opened tab.
+ * The tab starts in the GREEN stage with its age clock set to now.
+ *
+ * @param {chrome.tabs.Tab} tab - The Chrome tab object
+ * @param {number} currentActiveTimeMs - The current accumulated active time in ms
+ * @returns {object} A new tab metadata entry
+ */
+export function createFreshTabMetadata(tab, currentActiveTimeMs) {
   return {
     tabId: tab.id,
     windowId: tab.windowId,
-    refreshActiveTime: activeTimeMs,
+    refreshActiveTime: currentActiveTimeMs,
     refreshWallTime: Date.now(),
-    status: STATUS.GREEN,
-    groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
+    status: TAB_LIFECYCLE_STAGE.GREEN,
+    groupId: tab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? tab.groupId : null,
     isSpecialGroup: false,
     pinned: tab.pinned || false,
     url: tab.url || '',
   };
 }
 
-export function handleNavigation(existingMeta, activeTimeMs, url) {
+/**
+ * Resets a tab's age after the user navigates to a new page or holds focus for 15 seconds.
+ * The tab returns to GREEN status with fresh timestamps, preserving all other metadata.
+ *
+ * @param {object} existingMetadata - The tab's current metadata entry
+ * @param {number} currentActiveTimeMs - The current accumulated active time in ms
+ * @param {string} navigatedToUrl - The URL the tab navigated to (or current URL for focus refresh)
+ * @returns {object} Updated metadata entry with reset age
+ */
+export function resetTabAgeAfterNavigation(existingMetadata, currentActiveTimeMs, navigatedToUrl) {
   return {
-    ...existingMeta,
-    refreshActiveTime: activeTimeMs,
+    ...existingMetadata,
+    refreshActiveTime: currentActiveTimeMs,
     refreshWallTime: Date.now(),
-    status: STATUS.GREEN,
-    url: url || existingMeta.url || '',
+    status: TAB_LIFECYCLE_STAGE.GREEN,
+    url: navigatedToUrl || existingMetadata.url || '',
   };
 }
 
-export function reconcileTabs(storedMeta, chromeTabs, activeTimeMs) {
-  const reconciled = {};
-  const now = Date.now();
+/**
+ * Reconciles stored tab metadata with the actual tabs currently open in Chrome.
+ * After a browser restart, Chrome assigns new tab IDs, so this function
+ * matches stored entries by tab ID and creates fresh entries for unrecognized tabs.
+ *
+ * @param {object} storedMetadata - Previously persisted tab metadata (keyed by tab ID)
+ * @param {chrome.tabs.Tab[]} currentBrowserTabs - All tabs currently open in Chrome
+ * @param {number} currentActiveTimeMs - The current accumulated active time in ms
+ * @returns {object} Reconciled metadata collection keyed by current tab IDs
+ */
+export function reconcileTabMetadataWithBrowserTabs(storedMetadata, currentBrowserTabs, currentActiveTimeMs) {
+  const reconciledMetadata = {};
+  const currentTimestamp = Date.now();
 
-  for (const tab of chromeTabs) {
-    if (tab.pinned) continue;
+  for (const browserTab of currentBrowserTabs) {
+    if (browserTab.pinned) continue;
 
-    const stored = storedMeta[tab.id] || storedMeta[String(tab.id)];
-    if (stored) {
-      reconciled[tab.id] = {
-        ...stored,
-        windowId: tab.windowId,
-        groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
-        pinned: tab.pinned || false,
-        url: tab.url || stored.url || '',
+    const existingEntry = storedMetadata[browserTab.id] || storedMetadata[String(browserTab.id)];
+    if (existingEntry) {
+      reconciledMetadata[browserTab.id] = {
+        ...existingEntry,
+        windowId: browserTab.windowId,
+        groupId: browserTab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? browserTab.groupId : null,
+        pinned: browserTab.pinned || false,
+        url: browserTab.url || existingEntry.url || '',
       };
     } else {
-      reconciled[tab.id] = {
-        tabId: tab.id,
-        windowId: tab.windowId,
-        refreshActiveTime: activeTimeMs,
-        refreshWallTime: now,
-        status: STATUS.GREEN,
-        groupId: tab.groupId !== TAB_GROUP_ID_NONE ? tab.groupId : null,
+      reconciledMetadata[browserTab.id] = {
+        tabId: browserTab.id,
+        windowId: browserTab.windowId,
+        refreshActiveTime: currentActiveTimeMs,
+        refreshWallTime: currentTimestamp,
+        status: TAB_LIFECYCLE_STAGE.GREEN,
+        groupId: browserTab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? browserTab.groupId : null,
         isSpecialGroup: false,
         pinned: false,
-        url: tab.url || '',
+        url: browserTab.url || '',
       };
     }
   }
 
-  return reconciled;
+  return reconciledMetadata;
 }

@@ -28,13 +28,13 @@ globalThis.chrome = {
 };
 
 const {
-  createDefaultActiveTime,
-  initActiveTime,
-  recoverActiveTime,
-  handleFocusChange,
-  getCurrentActiveTime,
-  persistActiveTime,
-  getCachedActiveTimeState,
+  createDefaultActiveTimeState,
+  initializeActiveTimeInStorage,
+  recoverActiveTimeAfterRestart,
+  updateActiveTimeOnWindowFocusChange,
+  getCurrentTotalActiveTimeMs,
+  saveActiveTimeToStorage,
+  getActiveTimeSnapshot,
 } = await import('../../src/background/time-accumulator.js');
 
 describe('time-accumulator', () => {
@@ -45,9 +45,9 @@ describe('time-accumulator', () => {
     }
   });
 
-  describe('createDefaultActiveTime', () => {
+  describe('createDefaultActiveTimeState', () => {
     it('should return correct default state', () => {
-      const state = createDefaultActiveTime();
+      const state = createDefaultActiveTimeState();
       expect(state.accumulatedMs).toBe(0);
       expect(state.focusStartTime).toBeNull();
       expect(typeof state.lastPersistedAt).toBe('number');
@@ -55,18 +55,18 @@ describe('time-accumulator', () => {
     });
   });
 
-  describe('initActiveTime', () => {
+  describe('initializeActiveTimeInStorage', () => {
     it('should write defaults to storage and return state', async () => {
-      const state = await initActiveTime();
+      const state = await initializeActiveTimeInStorage();
       expect(state.accumulatedMs).toBe(0);
       expect(state.focusStartTime).toBeNull();
       expect(mockStorageSet).toHaveBeenCalled();
     });
   });
 
-  describe('recoverActiveTime', () => {
+  describe('recoverActiveTimeAfterRestart', () => {
     it('should initialize if no state exists', async () => {
-      const state = await recoverActiveTime();
+      const state = await recoverActiveTimeAfterRestart();
       expect(state.accumulatedMs).toBe(0);
       expect(state.focusStartTime).toBeNull();
     });
@@ -79,7 +79,7 @@ describe('time-accumulator', () => {
         lastPersistedAt: pastTime,
       };
 
-      const state = await recoverActiveTime();
+      const state = await recoverActiveTimeAfterRestart();
       // Should have added ~5000ms delta
       expect(state.accumulatedMs).toBeGreaterThanOrEqual(14000);
       expect(state.accumulatedMs).toBeLessThanOrEqual(16000);
@@ -93,83 +93,83 @@ describe('time-accumulator', () => {
         lastPersistedAt: pastTime,
       };
 
-      const state = await recoverActiveTime();
+      const state = await recoverActiveTimeAfterRestart();
       expect(state.accumulatedMs).toBe(10000);
     });
   });
 
-  describe('handleFocusChange', () => {
+  describe('updateActiveTimeOnWindowFocusChange', () => {
     beforeEach(async () => {
-      await initActiveTime();
+      await initializeActiveTimeInStorage();
     });
 
     it('should start accumulating when window gains focus', async () => {
-      const result = await handleFocusChange(1);
+      const result = await updateActiveTimeOnWindowFocusChange(1);
       expect(result.focusStartTime).not.toBeNull();
       expect(typeof result.focusStartTime).toBe('number');
     });
 
     it('should stop accumulating and add delta when all windows lose focus', async () => {
-      await handleFocusChange(1); // gain focus
-      await getCurrentActiveTime();
+      await updateActiveTimeOnWindowFocusChange(1); // gain focus
+      await getCurrentTotalActiveTimeMs();
 
       // Simulate small delay
-      const result = await handleFocusChange(chrome.windows.WINDOW_ID_NONE); // lose focus
+      const result = await updateActiveTimeOnWindowFocusChange(chrome.windows.WINDOW_ID_NONE); // lose focus
       expect(result.focusStartTime).toBeNull();
       expect(result.accumulatedMs).toBeGreaterThanOrEqual(0);
     });
 
     it('should not change focusStartTime when switching between windows', async () => {
-      await handleFocusChange(1); // focus window 1
-      const state1 = await getCachedActiveTimeState();
+      await updateActiveTimeOnWindowFocusChange(1); // focus window 1
+      const state1 = await getActiveTimeSnapshot();
       const startTime = state1.focusStartTime;
 
-      await handleFocusChange(2); // focus window 2 (still focused)
-      const state2 = await getCachedActiveTimeState();
+      await updateActiveTimeOnWindowFocusChange(2); // focus window 2 (still focused)
+      const state2 = await getActiveTimeSnapshot();
       expect(state2.focusStartTime).toBe(startTime);
     });
 
     it('should auto-recover if called before loading', async () => {
-      // Since we already called initActiveTime in beforeEach, cachedActiveTime is set.
+      // Since we already called initializeActiveTimeInStorage in beforeEach, cachedActiveTime is set.
       // Just verify the function returns a valid state after await.
-      const result = await handleFocusChange(1);
+      const result = await updateActiveTimeOnWindowFocusChange(1);
       expect(result).not.toBeNull();
     });
   });
 
-  describe('getCurrentActiveTime', () => {
+  describe('getCurrentTotalActiveTimeMs', () => {
     it('should return 0 when freshly initialized', async () => {
-      await initActiveTime();
-      const time = await getCurrentActiveTime();
+      await initializeActiveTimeInStorage();
+      const time = await getCurrentTotalActiveTimeMs();
       expect(time).toBe(0);
     });
 
     it('should include in-progress focus session', async () => {
-      await initActiveTime();
-      await handleFocusChange(1); // start focus
+      await initializeActiveTimeInStorage();
+      await updateActiveTimeOnWindowFocusChange(1); // start focus
 
-      // getCurrentActiveTime should include delta from focus start
-      const time = await getCurrentActiveTime();
+      // getCurrentTotalActiveTimeMs should include delta from focus start
+      const time = await getCurrentTotalActiveTimeMs();
       expect(time).toBeGreaterThanOrEqual(0);
     });
 
     it('should return accumulated time after focus ends', async () => {
-      await initActiveTime();
-      await handleFocusChange(1); // start focus
-      await handleFocusChange(chrome.windows.WINDOW_ID_NONE); // end focus
+      await initializeActiveTimeInStorage();
+      await updateActiveTimeOnWindowFocusChange(1); // start focus
+      await updateActiveTimeOnWindowFocusChange(chrome.windows.WINDOW_ID_NONE); // end focus
 
-      const time = await getCurrentActiveTime();
+      const time = await getCurrentTotalActiveTimeMs();
       expect(time).toBeGreaterThanOrEqual(0);
     });
   });
 
-  describe('persistActiveTime', () => {
+  describe('saveActiveTimeToStorage', () => {
     it('should write current state to storage', async () => {
-      await initActiveTime();
-      await handleFocusChange(1);
+      await initializeActiveTimeInStorage();
+      await updateActiveTimeOnWindowFocusChange(1);
 
       mockStorageSet.mockClear();
-      await persistActiveTime();
+      await saveActiveTimeToStorage();
       expect(mockStorageSet).toHaveBeenCalled();
     });
   });

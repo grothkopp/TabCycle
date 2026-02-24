@@ -28,10 +28,10 @@ globalThis.chrome = {
 };
 
 const {
-  computeGroupStatus,
-  updateGroupColor,
-  sortTabsAndGroups,
-  closeGoneGroups,
+  determineFreshestStatusInGroup,
+  updateGroupColorToMatchStatus,
+  sortTabsAndGroupsByLifecycleZone,
+  closeAllTabsInGoneGroups,
 } = await import('../../src/background/group-manager.js');
 
 describe('group-sorting', () => {
@@ -39,7 +39,7 @@ describe('group-sorting', () => {
     jest.clearAllMocks();
   });
 
-  describe('computeGroupStatus', () => {
+  describe('determineFreshestStatusInGroup', () => {
     it('should return status of the freshest (newest) tab in group', () => {
       const tabMeta = {
         1: { tabId: 1, groupId: 5, status: 'yellow', isSpecialGroup: false, pinned: false },
@@ -47,7 +47,7 @@ describe('group-sorting', () => {
         3: { tabId: 3, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
       };
       // Freshest tab is green → group status should be green
-      expect(computeGroupStatus(5, tabMeta)).toBe('green');
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBe('green');
     });
 
     it('should return yellow when freshest tab is yellow', () => {
@@ -55,7 +55,7 @@ describe('group-sorting', () => {
         1: { tabId: 1, groupId: 5, status: 'yellow', isSpecialGroup: false, pinned: false },
         2: { tabId: 2, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
       };
-      expect(computeGroupStatus(5, tabMeta)).toBe('yellow');
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBe('yellow');
     });
 
     it('should return red when all tabs are red', () => {
@@ -63,14 +63,14 @@ describe('group-sorting', () => {
         1: { tabId: 1, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
         2: { tabId: 2, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
       };
-      expect(computeGroupStatus(5, tabMeta)).toBe('red');
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBe('red');
     });
 
     it('should return null when no tabs belong to group', () => {
       const tabMeta = {
         1: { tabId: 1, groupId: 10, status: 'green', isSpecialGroup: false, pinned: false },
       };
-      expect(computeGroupStatus(5, tabMeta)).toBeNull();
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBeNull();
     });
 
     it('should skip pinned tabs', () => {
@@ -78,7 +78,7 @@ describe('group-sorting', () => {
         1: { tabId: 1, groupId: 5, status: 'green', isSpecialGroup: false, pinned: true },
         2: { tabId: 2, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
       };
-      expect(computeGroupStatus(5, tabMeta)).toBe('red');
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBe('red');
     });
 
     it('should skip tabs in special groups', () => {
@@ -86,28 +86,28 @@ describe('group-sorting', () => {
         1: { tabId: 1, groupId: 5, status: 'green', isSpecialGroup: true, pinned: false },
         2: { tabId: 2, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
       };
-      expect(computeGroupStatus(5, tabMeta)).toBe('red');
+      expect(determineFreshestStatusInGroup(5, tabMeta)).toBe('red');
     });
   });
 
-  describe('updateGroupColor', () => {
+  describe('updateGroupColorToMatchStatus', () => {
     it('should set green color for green status', async () => {
-      await updateGroupColor(5, 'green');
+      await updateGroupColorToMatchStatus(5, 'green');
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(5, { color: 'green' });
     });
 
     it('should set yellow color for yellow status', async () => {
-      await updateGroupColor(5, 'yellow');
+      await updateGroupColorToMatchStatus(5, 'yellow');
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(5, { color: 'yellow' });
     });
 
     it('should set red color for red status', async () => {
-      await updateGroupColor(5, 'red');
+      await updateGroupColorToMatchStatus(5, 'red');
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(5, { color: 'red' });
     });
   });
 
-  describe('closeGoneGroups', () => {
+  describe('closeAllTabsInGoneGroups', () => {
     it('should close all tabs in a gone user group', async () => {
       const tabMeta = {
         1: { tabId: 1, windowId: 1, groupId: 5, status: 'red', isSpecialGroup: false, pinned: false },
@@ -117,10 +117,10 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: 60 }, groupZones: { 5: 'red' } },
       };
 
-      // computeGroupStatus returns 'red' but we need to simulate gone
-      // closeGoneGroups works with a set of gone group IDs
+      // determineFreshestStatusInGroup returns 'red' but we need to simulate gone
+      // closeAllTabsInGoneGroups works with a set of gone group IDs
       const goneGroupIds = [5];
-      const closedTabIds = await closeGoneGroups(1, goneGroupIds, tabMeta, windowState);
+      const closedTabIds = await closeAllTabsInGoneGroups(1, goneGroupIds, tabMeta, windowState);
 
       expect(chrome.tabs.remove).toHaveBeenCalled();
       expect(closedTabIds).toContain(1);
@@ -135,14 +135,14 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: 60 }, groupZones: {} },
       };
 
-      const closedTabIds = await closeGoneGroups(1, [60], tabMeta, windowState);
+      const closedTabIds = await closeAllTabsInGoneGroups(1, [60], tabMeta, windowState);
       expect(chrome.tabs.remove).not.toHaveBeenCalled();
       expect(closedTabIds).toHaveLength(0);
     });
   });
 
-  // Helper: set up chrome.tabs.query and chrome.tabGroups.query for sortTabsAndGroups.
-  // sortTabsAndGroups calls tabs.query + tabGroups.query in phase 1 (tab sort),
+  // Helper: set up chrome.tabs.query and chrome.tabGroups.query for sortTabsAndGroupsByLifecycleZone.
+  // sortTabsAndGroupsByLifecycleZone calls tabs.query + tabGroups.query in phase 1 (tab sort),
   // then tabGroups.query again in phase 3 (group sort).
   function mockBrowserState(chromeTabs, chromeGroups) {
     chrome.tabs.query.mockResolvedValue(chromeTabs);
@@ -150,7 +150,7 @@ describe('group-sorting', () => {
     chrome.tabGroups.query.mockResolvedValue(chromeGroups);
   }
 
-  describe('sortTabsAndGroups – group sorting', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – group sorting', () => {
     // ── Already sorted ───────────────────────────────────────────────
 
     it('should not move groups when already in correct zone order', async () => {
@@ -176,7 +176,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[1]).toBe('green');
       expect(windowState[1].groupZones[2]).toBe('yellow');
@@ -210,7 +210,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.groupsMoved).toBe(3);
       const moveCalls = chrome.tabGroups.move.mock.calls;
@@ -244,7 +244,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
     });
@@ -269,7 +269,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
     });
@@ -297,7 +297,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
     });
@@ -327,7 +327,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'yellow', 2: 'yellow', 3: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[2]).toBe('green');
       // Desired: [green:2(new)] [yellow:1] [yellow:3]
@@ -361,7 +361,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'green', 3: 'green' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[2]).toBe('yellow');
       // Desired: [green:1] [green:3] [yellow:2(new)]
@@ -395,7 +395,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'green', 3: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[1]).toBe('red');
       // Desired: [green:2] [yellow:3] [red:1(new)]
@@ -436,7 +436,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: { 1: 'green', 2: 'yellow', 3: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Desired: [Yellow:50] [yellow:1(new)] [yellow:2] [yellow:3]
       expect(result.groupsMoved).toBe(4);
@@ -478,7 +478,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: 60 }, groupZones: { 1: 'green', 2: 'yellow', 3: 'red' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Desired: [green:1] [Yellow:50] [Red:60] [red:2(new)] [red:3]
       expect(result.groupsMoved).toBe(5);
@@ -515,7 +515,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'green', 3: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Desired: [green:3(new, leftmost)] [green:1] [green:2]
       expect(result.groupsMoved).toBe(3);
@@ -551,7 +551,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'green' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Desired: [green:3(new, leftmost)] [green:1] [green:2]
       expect(result.groupsMoved).toBe(3);
@@ -589,7 +589,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
@@ -612,7 +612,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
     });
@@ -645,7 +645,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Yellow should be moved to the right of all green groups
       expect(result.groupsMoved).toBe(3);
@@ -678,7 +678,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.groupsMoved).toBe(3);
       const moveCalls = chrome.tabGroups.move.mock.calls;
@@ -712,7 +712,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.groupsMoved).toBe(0);
       expect(chrome.tabGroups.move).not.toHaveBeenCalled();
@@ -747,7 +747,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: 60 }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.groupsMoved).toBe(5);
       const moveCalls = chrome.tabGroups.move.mock.calls;
@@ -784,7 +784,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Must NOT re-register the user group as a special group
       expect(windowState[1].specialGroups.yellow).toBeNull();
@@ -818,7 +818,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      await sortTabsAndGroups(1, tabMeta, windowState);
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       const updateCalls = chrome.tabGroups.update.mock.calls;
       for (const call of updateCalls) {
@@ -827,7 +827,7 @@ describe('group-sorting', () => {
     });
   });
 
-  describe('sortTabsAndGroups – threshold change resort', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – threshold change resort', () => {
     // Scenario A: When thresholds change, tabs that were yellow under old
     // thresholds may become green or red under new thresholds. The sort
     // must move them to the correct special group (or ungroup them).
@@ -851,7 +851,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Tab is green but in Yellow special → should be moved out
       expect(result.tabsMoved).toBe(1);
@@ -886,7 +886,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(1);
       expect(tabMeta[10].groupId).toBe(60);
@@ -920,7 +920,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'yellow', 3: 'green' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[1]).toBe('yellow');
       expect(windowState[1].groupZones[2]).toBe('red');
@@ -934,7 +934,7 @@ describe('group-sorting', () => {
     });
   });
 
-  describe('sortTabsAndGroups – refresh in user group triggers resort', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – refresh in user group triggers resort', () => {
     // Scenario C: When a tab in a yellow/red user group is refreshed
     // (navigated), its status becomes green. The group's status is
     // recomputed (freshest tab = green) and the group moves to green zone.
@@ -965,7 +965,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'yellow', 2: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Group 1 should now be green (freshest tab is green)
       expect(windowState[1].groupZones[1]).toBe('green');
@@ -1001,7 +1001,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Group 2 should now be green (refreshed)
       expect(windowState[1].groupZones[2]).toBe('green');
@@ -1013,7 +1013,7 @@ describe('group-sorting', () => {
     });
   });
 
-  describe('sortTabsAndGroups – tab dragged to different-status group', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – tab dragged to different-status group', () => {
     // Scenario D: When a user drags a green tab into a yellow group,
     // the group's status is recomputed. If the freshest tab is now green,
     // the group becomes green and must be resorted to the green zone.
@@ -1047,7 +1047,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'yellow', 3: 'yellow' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Group 2 should now be green (freshest tab is green)
       expect(windowState[1].groupZones[2]).toBe('green');
@@ -1084,7 +1084,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Group 2 should now be yellow (freshest tab is yellow)
       expect(windowState[1].groupZones[2]).toBe('yellow');
@@ -1116,13 +1116,13 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 2: 'red' } },
       };
 
-      await sortTabsAndGroups(1, tabMeta, windowState);
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(windowState[1].groupZones[2]).toBe('red');
     });
   });
 
-  describe('sortTabsAndGroups – ungrouped tab sorting', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – ungrouped tab sorting', () => {
     it('should move ungrouped yellow tab to yellow special group', async () => {
       // Tab 10 is ungrouped but status=yellow → should be moved to yellow special group
       const groups = [];
@@ -1143,7 +1143,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(1);
       expect(tabMeta[10].isSpecialGroup).toBe(true);
@@ -1173,7 +1173,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(1);
       expect(windowState[1].specialGroups.yellow).toBe(100);
@@ -1199,7 +1199,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(0);
       expect(tabMeta[10].isSpecialGroup).toBe(false);
@@ -1234,7 +1234,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(1);
       expect(tabMeta[10].groupId).toBe(60);
@@ -1258,7 +1258,7 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: 50, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.tabsMoved).toBe(0);
     });
@@ -1290,7 +1290,7 @@ describe('group-sorting', () => {
         isBookmarkableUrl: mockIsBookmarkableUrl,
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, goneConfig);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, goneConfig);
 
       expect(result.goneTabsClosed).toBe(1);
       expect(mockBookmarkTab).toHaveBeenCalledTimes(1);
@@ -1326,7 +1326,7 @@ describe('group-sorting', () => {
         isBookmarkableUrl: mockIsBookmarkableUrl,
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, goneConfig);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, goneConfig);
 
       expect(result.goneTabsClosed).toBe(1);
       expect(mockBookmarkTab).toHaveBeenCalledTimes(1);
@@ -1349,7 +1349,7 @@ describe('group-sorting', () => {
       };
 
       // No goneConfig passed → gone tabs are skipped
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       expect(result.goneTabsClosed).toBe(0);
       expect(chrome.tabs.remove).not.toHaveBeenCalled();
@@ -1373,14 +1373,14 @@ describe('group-sorting', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
       };
 
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Tab should not be individually moved — it's in a user group
       expect(result.tabsMoved).toBe(0);
     });
   });
 
-  describe('sortTabsAndGroups – gone zone handling', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – gone zone handling', () => {
     function makeGoneConfig(overrides = {}) {
       return {
         bookmarkEnabled: true,
@@ -1422,7 +1422,7 @@ describe('group-sorting', () => {
       };
 
       const gc = makeGoneConfig();
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
 
       expect(result.goneGroupsClosed).toBe(1);
       expect(gc.bookmarkGroupTabs).toHaveBeenCalledWith('OldGroup', tabs, 'folder-1');
@@ -1435,7 +1435,7 @@ describe('group-sorting', () => {
 
     it('should NOT close a group when only some tabs are gone but group is refreshed', async () => {
       // Tab 10 is gone individually, but tab 20 was refreshed (green).
-      // computeGroupStatus returns 'green' → group is NOT gone.
+      // determineFreshestStatusInGroup returns 'green' → group is NOT gone.
       // Tab 10 is in a user group → skipped in phase 2 (ungrouped tab sort).
       // The group should NOT be closed.
       const groups = [
@@ -1457,7 +1457,7 @@ describe('group-sorting', () => {
       };
 
       const gc = makeGoneConfig();
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
 
       // Group is NOT gone (freshest tab is green) → no closing
       expect(result.goneGroupsClosed).toBe(0);
@@ -1496,7 +1496,7 @@ describe('group-sorting', () => {
       };
 
       const gc = makeGoneConfig();
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
 
       expect(result.goneGroupsClosed).toBe(1);
       // Tab 10 was successfully closed → removed from tabMeta
@@ -1521,7 +1521,7 @@ describe('group-sorting', () => {
       };
 
       const gc = makeGoneConfig({ bookmarkEnabled: false });
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
 
       expect(result.goneTabsClosed).toBe(1);
       expect(gc.bookmarkTab).not.toHaveBeenCalled();
@@ -1531,7 +1531,7 @@ describe('group-sorting', () => {
 
   // ─── v2: Split sorting gate tests ──────────────────────────────────────────
 
-  describe('sortTabsAndGroups – v2 toggle gates', () => {
+  describe('sortTabsAndGroupsByLifecycleZone – v2 toggle gates', () => {
     it('should skip tab sorting but still do group sorting when tabSortingEnabled=false, tabgroupSortingEnabled=true', async () => {
       // Ungrouped yellow tab should NOT be moved to special group when tabSortingEnabled=false
       // But group zone-sorting should still work
@@ -1557,7 +1557,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: true, tabgroupColoringEnabled: true };
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       // Tab 30 should NOT be moved to special group (tab sorting disabled)
       expect(result.tabsMoved).toBe(0);
@@ -1590,7 +1590,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: true, tabgroupSortingEnabled: false, tabgroupColoringEnabled: true };
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       // Groups should NOT be moved
       expect(result.groupsMoved).toBe(0);
@@ -1615,7 +1615,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: true, tabgroupSortingEnabled: true, tabgroupColoringEnabled: false };
-      await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       // Color updates should NOT have been called
       const colorUpdateCalls = chrome.tabGroups.update.mock.calls.filter(
@@ -1647,7 +1647,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: false, tabgroupColoringEnabled: false };
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       expect(result.tabsMoved).toBe(0);
       expect(result.groupsMoved).toBe(0);
@@ -1680,7 +1680,7 @@ describe('group-sorting', () => {
       };
 
       const settings = { tabSortingEnabled: false, tabgroupSortingEnabled: false, tabgroupColoringEnabled: false };
-      const result = await sortTabsAndGroups(1, tabMeta, windowState, gc, settings);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc, settings);
 
       // Gone tabs should still be closed
       expect(result.goneTabsClosed).toBe(1);
@@ -1708,7 +1708,7 @@ describe('group-sorting', () => {
       };
 
       // No settings → all toggles default to true → normal sorting
-      const result = await sortTabsAndGroups(1, tabMeta, windowState);
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState);
 
       // Should move groups to correct zone order
       expect(result.groupsMoved).toBeGreaterThan(0);

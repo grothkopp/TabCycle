@@ -1,17 +1,33 @@
+/**
+ * Tracks how long the browser has been actively used (window focused).
+ *
+ * Active time accumulates independently of all settings toggles. When aging
+ * is paused, the clock keeps ticking so tab ages remain accurate when aging
+ * resumes. An age cap (applied in service-worker.js on re-enable) prevents
+ * mass tab closure after a long pause.
+ *
+ * The accumulator works like a stopwatch:
+ *   - When a Chrome window gains focus → start the stopwatch
+ *   - When all windows lose focus → stop and add elapsed time to the total
+ *   - getCurrentTotalActiveTimeMs() returns the total, including any currently running segment
+ */
+
 import { STORAGE_KEYS } from '../shared/constants.js';
 import { createLogger } from '../shared/logger.js';
-import { readState, batchWrite } from './state-persistence.js';
+import { readValidatedStateFromStorage, writeMultipleStateEntries } from './state-persistence.js';
 
 const logger = createLogger('background');
 
-// Design decision (research.md R3): The active time accumulator runs independently
-// of all settings toggles (agingEnabled, etc.). When aging is paused, the clock
-// keeps ticking so that tab ages remain accurate when aging resumes. The age cap
-// (applied on re-enable in service-worker.js) prevents mass tab closure.
-let cachedActiveTime = null;
-let loadingPromise = null;
+/** In-memory cache of the active time state. Null until first load. */
+let inMemoryActiveTimeState = null;
 
-export function createDefaultActiveTime() {
+/** Promise for the in-flight load operation, to avoid duplicate loads. */
+let pendingLoadPromise = null;
+
+/**
+ * Creates a default active time state (zero accumulated, no focus, timestamped now).
+ */
+export function createDefaultActiveTimeState() {
   return {
     accumulatedMs: 0,
     focusStartTime: null,
@@ -19,93 +35,137 @@ export function createDefaultActiveTime() {
   };
 }
 
-export async function initActiveTime() {
-  const defaultState = createDefaultActiveTime();
-  await batchWrite({ [STORAGE_KEYS.ACTIVE_TIME]: defaultState });
-  cachedActiveTime = defaultState;
+/**
+ * Initializes active time state in storage with default values.
+ * Called on first extension install.
+ */
+export async function initializeActiveTimeInStorage() {
+  const defaultState = createDefaultActiveTimeState();
+  await writeMultipleStateEntries({ [STORAGE_KEYS.ACTIVE_TIME]: defaultState });
+  inMemoryActiveTimeState = defaultState;
   return defaultState;
 }
 
-export async function loadActiveTime() {
-  const result = await readState([STORAGE_KEYS.ACTIVE_TIME]);
-  cachedActiveTime = result[STORAGE_KEYS.ACTIVE_TIME] || null;
-  return cachedActiveTime;
+/**
+ * Loads active time state from storage into the in-memory cache.
+ */
+export async function loadActiveTimeFromStorage() {
+  const storedData = await readValidatedStateFromStorage([STORAGE_KEYS.ACTIVE_TIME]);
+  inMemoryActiveTimeState = storedData[STORAGE_KEYS.ACTIVE_TIME] || null;
+  return inMemoryActiveTimeState;
 }
 
-async function ensureActiveTimeLoaded() {
-  if (cachedActiveTime) return cachedActiveTime;
-  if (loadingPromise) return loadingPromise;
-  loadingPromise = recoverActiveTime().finally(() => { loadingPromise = null; });
-  return loadingPromise;
+/**
+ * Ensures the active time state is loaded into memory before any operation.
+ * Deduplicates concurrent load requests via a shared promise.
+ */
+async function ensureActiveTimeIsLoaded() {
+  if (inMemoryActiveTimeState) return inMemoryActiveTimeState;
+  if (pendingLoadPromise) return pendingLoadPromise;
+  pendingLoadPromise = recoverActiveTimeAfterRestart().finally(() => { pendingLoadPromise = null; });
+  return pendingLoadPromise;
 }
 
-export async function recoverActiveTime() {
-  const state = await loadActiveTime();
-  if (!state) {
+/**
+ * Recovers active time state after a service worker restart.
+ *
+ * If the browser had focus when the service worker was killed, the time between
+ * the last persist and now is added to the accumulated total, so no active time
+ * is lost during restarts.
+ */
+export async function recoverActiveTimeAfterRestart() {
+  const loadedState = await loadActiveTimeFromStorage();
+  if (!loadedState) {
     logger.info('No active time state found, initializing');
-    return initActiveTime();
+    return initializeActiveTimeInStorage();
   }
 
-  if (state.focusStartTime !== null) {
-    const delta = Date.now() - state.lastPersistedAt;
-    if (delta > 0) {
-      state.accumulatedMs += delta;
+  if (loadedState.focusStartTime !== null) {
+    const millisecondsSinceLastPersist = Date.now() - loadedState.lastPersistedAt;
+    if (millisecondsSinceLastPersist > 0) {
+      loadedState.accumulatedMs += millisecondsSinceLastPersist;
       logger.info('Recovered active time after service worker restart', {
-        deltaMs: delta,
-        newAccumulatedMs: state.accumulatedMs,
+        deltaMs: millisecondsSinceLastPersist,
+        newAccumulatedMs: loadedState.accumulatedMs,
       });
     }
   }
 
-  state.lastPersistedAt = Date.now();
-  cachedActiveTime = state;
-  await batchWrite({ [STORAGE_KEYS.ACTIVE_TIME]: state });
-  return state;
+  loadedState.lastPersistedAt = Date.now();
+  inMemoryActiveTimeState = loadedState;
+  await writeMultipleStateEntries({ [STORAGE_KEYS.ACTIVE_TIME]: loadedState });
+  return loadedState;
 }
 
-export async function handleFocusChange(windowId) {
-  await ensureActiveTimeLoaded();
+/**
+ * Updates the active time accumulator when a Chrome window gains or loses focus.
+ *
+ * When focus moves away from all Chrome windows (windowId === WINDOW_ID_NONE),
+ * the elapsed focus time is added to the total. When a window gains focus,
+ * the stopwatch starts.
+ *
+ * @param {number} windowId - The window that gained focus, or WINDOW_ID_NONE
+ * @returns {Promise<object>} Snapshot of the current active time state
+ */
+export async function updateActiveTimeOnWindowFocusChange(windowId) {
+  await ensureActiveTimeIsLoaded();
 
   const now = Date.now();
   const WINDOW_ID_NONE = chrome.windows.WINDOW_ID_NONE;
 
   if (windowId === WINDOW_ID_NONE) {
-    if (cachedActiveTime.focusStartTime !== null) {
-      const delta = now - cachedActiveTime.focusStartTime;
-      if (delta > 0) {
-        cachedActiveTime.accumulatedMs += delta;
+    // All Chrome windows lost focus — stop the stopwatch
+    if (inMemoryActiveTimeState.focusStartTime !== null) {
+      const elapsedSinceFocusStart = now - inMemoryActiveTimeState.focusStartTime;
+      if (elapsedSinceFocusStart > 0) {
+        inMemoryActiveTimeState.accumulatedMs += elapsedSinceFocusStart;
       }
-      cachedActiveTime.focusStartTime = null;
+      inMemoryActiveTimeState.focusStartTime = null;
     }
   } else {
-    if (cachedActiveTime.focusStartTime === null) {
-      cachedActiveTime.focusStartTime = now;
+    // A Chrome window gained focus — start the stopwatch
+    if (inMemoryActiveTimeState.focusStartTime === null) {
+      inMemoryActiveTimeState.focusStartTime = now;
     }
   }
 
-  cachedActiveTime.lastPersistedAt = now;
-  return { ...cachedActiveTime };
+  inMemoryActiveTimeState.lastPersistedAt = now;
+  return { ...inMemoryActiveTimeState };
 }
 
-export async function getCurrentActiveTime() {
-  await ensureActiveTimeLoaded();
-  let total = cachedActiveTime.accumulatedMs;
-  if (cachedActiveTime.focusStartTime !== null) {
-    const delta = Date.now() - cachedActiveTime.focusStartTime;
-    if (delta > 0) {
-      total += delta;
+/**
+ * Calculates the current total active time in milliseconds.
+ * Includes any currently-running focus segment (time since the window was last focused).
+ *
+ * @returns {Promise<number>} Total accumulated active time in ms
+ */
+export async function getCurrentTotalActiveTimeMs() {
+  await ensureActiveTimeIsLoaded();
+  let totalMs = inMemoryActiveTimeState.accumulatedMs;
+  if (inMemoryActiveTimeState.focusStartTime !== null) {
+    const elapsedInCurrentSegment = Date.now() - inMemoryActiveTimeState.focusStartTime;
+    if (elapsedInCurrentSegment > 0) {
+      totalMs += elapsedInCurrentSegment;
     }
   }
-  return total;
+  return totalMs;
 }
 
-export async function persistActiveTime() {
-  await ensureActiveTimeLoaded();
-  cachedActiveTime.lastPersistedAt = Date.now();
-  await batchWrite({ [STORAGE_KEYS.ACTIVE_TIME]: { ...cachedActiveTime } });
+/**
+ * Persists the current in-memory active time state to chrome.storage.local.
+ * Called periodically (every evaluation cycle) to survive service worker restarts.
+ */
+export async function saveActiveTimeToStorage() {
+  await ensureActiveTimeIsLoaded();
+  inMemoryActiveTimeState.lastPersistedAt = Date.now();
+  await writeMultipleStateEntries({ [STORAGE_KEYS.ACTIVE_TIME]: { ...inMemoryActiveTimeState } });
 }
 
-export async function getCachedActiveTimeState() {
-  await ensureActiveTimeLoaded();
-  return { ...cachedActiveTime };
+/**
+ * Returns a snapshot of the in-memory active time state.
+ * Useful for diagnostics and logging.
+ */
+export async function getActiveTimeSnapshot() {
+  await ensureActiveTimeIsLoaded();
+  return { ...inMemoryActiveTimeState };
 }

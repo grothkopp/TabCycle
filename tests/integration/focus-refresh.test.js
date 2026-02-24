@@ -126,37 +126,37 @@ globalThis.chrome = {
 };
 
 await jest.unstable_mockModule('../../src/background/group-manager.js', () => ({
-  isSpecialGroup: jest.fn(() => false),
-  getSpecialGroupType: jest.fn(() => null),
-  removeSpecialGroupIfEmpty: jest.fn(async () => {}),
-  ungroupTab: jest.fn(async () => {}),
-  computeGroupStatus: jest.fn(() => null),
-  updateGroupColor: jest.fn(async () => {}),
-  sortTabsAndGroups: jest.fn(async () => {}),
-  dissolveUnnamedSingleTabGroups: jest.fn(async () => ({ dissolved: 0 })),
-  dissolveSpecialGroups: jest.fn(async () => ({ dissolved: 0 })),
-  autoNameEligibleGroups: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
-  applyUserEditLock: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
-  consumeExpectedExtensionTitleUpdate: jest.fn(() => false),
-  consumeExpectedExtensionColorUpdate: jest.fn(() => false),
-  stripAgeSuffix: jest.fn((title) => title),
-  formatAge: jest.fn(() => ''),
-  computeGroupAge: jest.fn(() => 0),
-  updateGroupTitlesWithAge: jest.fn(async () => {}),
-  removeAgeSuffixFromAllGroups: jest.fn(async () => {}),
+  isManagedAgingGroup: jest.fn(() => false),
+  getManagedGroupType: jest.fn(() => null),
+  removeManagedGroupIfEmpty: jest.fn(async () => {}),
+  removeTabFromItsGroup: jest.fn(async () => {}),
+  determineFreshestStatusInGroup: jest.fn(() => null),
+  updateGroupColorToMatchStatus: jest.fn(async () => {}),
+  sortTabsAndGroupsByLifecycleZone: jest.fn(async () => {}),
+  dissolveUnnamedGroupsWithOnlyOneTab: jest.fn(async () => ({ dissolved: 0 })),
+  dissolveManagedGroupsInWindow: jest.fn(async () => ({ dissolved: 0 })),
+  autoNameUnnamedGroupsWhenReady: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
+  lockAutoNamingAfterUserEdit: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
+  acknowledgeExtensionTitleChangeIfExpected: jest.fn(() => false),
+  acknowledgeExtensionColorChangeIfExpected: jest.fn(() => false),
+  removeAgeSuffixFromTitle: jest.fn((title) => title),
+  formatAgeAsShortString: jest.fn(() => ''),
+  calculateAgeOfFreshestTabInGroup: jest.fn(() => 0),
+  appendAgeToAllGroupTitles: jest.fn(async () => {}),
+  removeAgeSuffixFromAllGroupTitles: jest.fn(async () => {}),
 }));
 
 await jest.unstable_mockModule('../../src/background/time-accumulator.js', () => ({
-  initActiveTime: jest.fn(async () => {}),
-  recoverActiveTime: jest.fn(async () => {}),
-  handleFocusChange: jest.fn(async () => null),
-  persistActiveTime: jest.fn(async () => {}),
-  getCurrentActiveTime: jest.fn(async () => 5000),
-  getCachedActiveTimeState: jest.fn(async () => ({ accumulatedMs: 5000, focusStartTime: null })),
+  initializeActiveTimeInStorage: jest.fn(async () => {}),
+  recoverActiveTimeAfterRestart: jest.fn(async () => {}),
+  updateActiveTimeOnWindowFocusChange: jest.fn(async () => null),
+  saveActiveTimeToStorage: jest.fn(async () => {}),
+  getCurrentTotalActiveTimeMs: jest.fn(async () => 5000),
+  getActiveTimeSnapshot: jest.fn(async () => ({ accumulatedMs: 5000, focusStartTime: null })),
 }));
 
 await jest.unstable_mockModule('../../src/background/tab-placer.js', () => ({
-  placeNewTab: jest.fn(async () => {}),
+  placeNewlyCreatedTabNearItsContext: jest.fn(async () => {}),
 }));
 
 groupManager = await import('../../src/background/group-manager.js');
@@ -169,11 +169,11 @@ describe('focus-based refresh integration', () => {
     // Clear call history but keep mock implementations
     chrome.tabs.get.mockClear();
     chrome.tabs.move.mockClear();
-    groupManager.ungroupTab.mockClear();
-    groupManager.getSpecialGroupType.mockClear();
-    groupManager.getSpecialGroupType.mockReturnValue(null);
-    groupManager.removeSpecialGroupIfEmpty.mockClear();
-    groupManager.sortTabsAndGroups.mockClear();
+    groupManager.removeTabFromItsGroup.mockClear();
+    groupManager.getManagedGroupType.mockClear();
+    groupManager.getManagedGroupType.mockReturnValue(null);
+    groupManager.removeManagedGroupIfEmpty.mockClear();
+    groupManager.sortTabsAndGroupsByLifecycleZone.mockClear();
   });
 
   afterEach(() => {
@@ -298,7 +298,7 @@ describe('focus-based refresh integration', () => {
       id: tabId, windowId: 1, groupId: specialGroupId, pinned: false, discarded: false, status: 'complete',
     });
 
-    groupManager.getSpecialGroupType.mockReturnValue('yellow');
+    groupManager.getManagedGroupType.mockReturnValue('yellow');
 
     listeners.tabsOnActivated({ tabId, windowId: 1 });
     await jest.advanceTimersByTimeAsync(15_000);
@@ -307,9 +307,9 @@ describe('focus-based refresh integration', () => {
     expect(updated.status).toBe('green');
     expect(updated.groupId).toBe(null);
     expect(updated.isSpecialGroup).toBe(false);
-    expect(groupManager.ungroupTab).toHaveBeenCalledWith(tabId);
+    expect(groupManager.removeTabFromItsGroup).toHaveBeenCalledWith(tabId);
     expect(chrome.tabs.move).toHaveBeenCalledWith(tabId, { index: 0 });
-    expect(groupManager.removeSpecialGroupIfEmpty).toHaveBeenCalled();
+    expect(groupManager.removeManagedGroupIfEmpty).toHaveBeenCalled();
   });
 
   it('gracefully handles tab removed before timer fires', async () => {

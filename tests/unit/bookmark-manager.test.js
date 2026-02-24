@@ -22,10 +22,10 @@ globalThis.chrome = {
 };
 
 import {
-  resolveBookmarkFolder,
-  isBookmarkableUrl,
-  bookmarkTab,
-  bookmarkGroupTabs,
+  findOrCreateBookmarkFolderForClosedTabs,
+  isUrlWorthBookmarking,
+  createBookmarkForSingleTab,
+  createBookmarkSubfolderForTabGroup,
 } from '../../src/background/bookmark-manager.js';
 
 beforeEach(() => {
@@ -42,50 +42,50 @@ beforeEach(() => {
   mockStorage.local.set.mockResolvedValue(undefined);
 });
 
-describe('isBookmarkableUrl', () => {
+describe('isUrlWorthBookmarking', () => {
   it('should return false for empty string', () => {
-    expect(isBookmarkableUrl('')).toBe(false);
+    expect(isUrlWorthBookmarking('')).toBe(false);
   });
 
   it('should return false for undefined', () => {
-    expect(isBookmarkableUrl(undefined)).toBe(false);
+    expect(isUrlWorthBookmarking(undefined)).toBe(false);
   });
 
   it('should return false for null', () => {
-    expect(isBookmarkableUrl(null)).toBe(false);
+    expect(isUrlWorthBookmarking(null)).toBe(false);
   });
 
   it('should return false for chrome://newtab', () => {
-    expect(isBookmarkableUrl('chrome://newtab')).toBe(false);
+    expect(isUrlWorthBookmarking('chrome://newtab')).toBe(false);
   });
 
   it('should return false for chrome://newtab/', () => {
-    expect(isBookmarkableUrl('chrome://newtab/')).toBe(false);
+    expect(isUrlWorthBookmarking('chrome://newtab/')).toBe(false);
   });
 
   it('should return false for about:blank', () => {
-    expect(isBookmarkableUrl('about:blank')).toBe(false);
+    expect(isUrlWorthBookmarking('about:blank')).toBe(false);
   });
 
   it('should return true for a valid HTTP URL', () => {
-    expect(isBookmarkableUrl('https://example.com')).toBe(true);
+    expect(isUrlWorthBookmarking('https://example.com')).toBe(true);
   });
 
   it('should return true for chrome://settings', () => {
-    expect(isBookmarkableUrl('chrome://settings')).toBe(true);
+    expect(isUrlWorthBookmarking('chrome://settings')).toBe(true);
   });
 
   it('should return true for file:// URL', () => {
-    expect(isBookmarkableUrl('file:///home/user/doc.html')).toBe(true);
+    expect(isUrlWorthBookmarking('file:///home/user/doc.html')).toBe(true);
   });
 });
 
-describe('bookmarkTab', () => {
+describe('createBookmarkForSingleTab', () => {
   it('should call chrome.bookmarks.create with correct params', async () => {
     mockBookmarks.create.mockResolvedValue({ id: '100' });
     const tab = { id: 1, title: 'Test Page', url: 'https://example.com' };
 
-    const result = await bookmarkTab(tab, '42');
+    const result = await createBookmarkForSingleTab(tab, '42');
 
     expect(result).toBe(true);
     expect(mockBookmarks.create).toHaveBeenCalledWith({
@@ -99,7 +99,7 @@ describe('bookmarkTab', () => {
     mockBookmarks.create.mockResolvedValue({ id: '100' });
     const tab = { id: 1, title: '', url: 'https://example.com' };
 
-    await bookmarkTab(tab, '42');
+    await createBookmarkForSingleTab(tab, '42');
 
     expect(mockBookmarks.create).toHaveBeenCalledWith({
       parentId: '42',
@@ -112,7 +112,7 @@ describe('bookmarkTab', () => {
     mockBookmarks.create.mockResolvedValue({ id: '100' });
     const tab = { id: 1, url: 'https://example.com' };
 
-    await bookmarkTab(tab, '42');
+    await createBookmarkForSingleTab(tab, '42');
 
     expect(mockBookmarks.create).toHaveBeenCalledWith({
       parentId: '42',
@@ -125,7 +125,7 @@ describe('bookmarkTab', () => {
     mockBookmarks.create.mockResolvedValue({ id: '100' });
     const tab = { id: 1, title: '   ', url: 'https://example.com' };
 
-    await bookmarkTab(tab, '42');
+    await createBookmarkForSingleTab(tab, '42');
 
     expect(mockBookmarks.create).toHaveBeenCalledWith({
       parentId: '42',
@@ -138,13 +138,13 @@ describe('bookmarkTab', () => {
     mockBookmarks.create.mockRejectedValue(new Error('Bookmark API error'));
     const tab = { id: 1, title: 'Test', url: 'https://example.com' };
 
-    const result = await bookmarkTab(tab, '42');
+    const result = await createBookmarkForSingleTab(tab, '42');
 
     expect(result).toBe(false);
   });
 });
 
-describe('bookmarkGroupTabs', () => {
+describe('createBookmarkSubfolderForTabGroup', () => {
   it('should create subfolder then bookmark each tab', async () => {
     mockBookmarks.create
       .mockResolvedValueOnce({ id: '200' }) // subfolder
@@ -155,7 +155,7 @@ describe('bookmarkGroupTabs', () => {
       { id: 2, title: 'Tab 2', url: 'https://b.com' },
     ];
 
-    const result = await bookmarkGroupTabs('My Group', tabs, '42');
+    const result = await createBookmarkSubfolderForTabGroup('My Group', tabs, '42');
 
     expect(result.created).toBe(2);
     expect(result.skipped).toBe(0);
@@ -175,7 +175,7 @@ describe('bookmarkGroupTabs', () => {
   it('should use "(unnamed)" for empty group title', async () => {
     mockBookmarks.create.mockResolvedValue({ id: '200' });
 
-    await bookmarkGroupTabs('', [{ id: 1, title: 'Tab', url: 'https://a.com' }], '42');
+    await createBookmarkSubfolderForTabGroup('', [{ id: 1, title: 'Tab', url: 'https://a.com' }], '42');
 
     expect(mockBookmarks.create).toHaveBeenNthCalledWith(1, {
       parentId: '42',
@@ -186,7 +186,7 @@ describe('bookmarkGroupTabs', () => {
   it('should use "(unnamed)" for undefined group title', async () => {
     mockBookmarks.create.mockResolvedValue({ id: '200' });
 
-    await bookmarkGroupTabs(undefined, [{ id: 1, title: 'Tab', url: 'https://a.com' }], '42');
+    await createBookmarkSubfolderForTabGroup(undefined, [{ id: 1, title: 'Tab', url: 'https://a.com' }], '42');
 
     expect(mockBookmarks.create).toHaveBeenNthCalledWith(1, {
       parentId: '42',
@@ -203,7 +203,7 @@ describe('bookmarkGroupTabs', () => {
       { id: 3, title: 'Blank', url: 'about:blank' },
     ];
 
-    const result = await bookmarkGroupTabs('Group', tabs, '42');
+    const result = await createBookmarkSubfolderForTabGroup('Group', tabs, '42');
 
     expect(result.created).toBe(1);
     expect(result.skipped).toBe(2);
@@ -222,14 +222,14 @@ describe('bookmarkGroupTabs', () => {
       { id: 2, title: 'Tab 2', url: 'https://b.com' },
     ];
 
-    const result = await bookmarkGroupTabs('Group', tabs, '42');
+    const result = await createBookmarkSubfolderForTabGroup('Group', tabs, '42');
 
     expect(result.created).toBe(1);
     expect(result.failed).toBe(1);
   });
 });
 
-describe('resolveBookmarkFolder', () => {
+describe('findOrCreateBookmarkFolderForClosedTabs', () => {
   const defaultSettings = {
     bookmarkFolderName: 'Closed Tabs',
   };
@@ -242,7 +242,7 @@ describe('resolveBookmarkFolder', () => {
     });
     mockBookmarks.get.mockResolvedValue([{ id: '50', title: 'Closed Tabs' }]);
 
-    const result = await resolveBookmarkFolder(defaultSettings);
+    const result = await findOrCreateBookmarkFolderForClosedTabs(defaultSettings);
 
     expect(result).toBe('50');
     expect(mockBookmarks.get).toHaveBeenCalledWith('50');
@@ -259,7 +259,7 @@ describe('resolveBookmarkFolder', () => {
       { id: '61', title: 'Some Bookmark', url: 'https://x.com' },
     ]);
 
-    const result = await resolveBookmarkFolder(defaultSettings);
+    const result = await findOrCreateBookmarkFolderForClosedTabs(defaultSettings);
 
     expect(result).toBe('60');
     expect(mockStorage.local.set).toHaveBeenCalledWith({
@@ -272,7 +272,7 @@ describe('resolveBookmarkFolder', () => {
     mockBookmarks.getChildren.mockResolvedValue([]);
     mockBookmarks.create.mockResolvedValue({ id: '70' });
 
-    const result = await resolveBookmarkFolder(defaultSettings);
+    const result = await findOrCreateBookmarkFolderForClosedTabs(defaultSettings);
 
     expect(result).toBe('70');
     expect(mockBookmarks.create).toHaveBeenCalledWith({
@@ -293,7 +293,7 @@ describe('resolveBookmarkFolder', () => {
     // Folder was renamed externally to "My Renamed Folder"
     mockBookmarks.get.mockResolvedValue([{ id: '50', title: 'My Renamed Folder' }]);
 
-    const result = await resolveBookmarkFolder(defaultSettings);
+    const result = await findOrCreateBookmarkFolderForClosedTabs(defaultSettings);
 
     expect(result).toBe('50');
     // Should have updated settings with the new name
@@ -309,7 +309,7 @@ describe('resolveBookmarkFolder', () => {
     mockBookmarks.getChildren.mockResolvedValue([]);
     mockBookmarks.create.mockResolvedValue({ id: '80' });
 
-    const result = await resolveBookmarkFolder({});
+    const result = await findOrCreateBookmarkFolderForClosedTabs({});
 
     expect(result).toBe('80');
     expect(mockBookmarks.create).toHaveBeenCalledWith({
@@ -321,7 +321,7 @@ describe('resolveBookmarkFolder', () => {
   it('should return null when all operations fail', async () => {
     mockStorage.local.get.mockRejectedValue(new Error('storage error'));
 
-    const result = await resolveBookmarkFolder(defaultSettings);
+    const result = await findOrCreateBookmarkFolderForClosedTabs(defaultSettings);
 
     expect(result).toBeNull();
   });

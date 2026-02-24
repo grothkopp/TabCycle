@@ -1,9 +1,9 @@
 import { jest } from '@jest/globals';
 import {
-  tokenizeForGroupNaming,
-  extractHostnameKeywords,
-  rankNameCandidates,
-  generateGroupNameFromTabs,
+  extractMeaningfulWordsFromText,
+  extractKeywordsFromHostname,
+  rankAllNameCandidatesByRelevance,
+  generateBestGroupNameFromTabs,
 } from '../../src/background/group-name-generator.js';
 
 describe('group-name-generator', () => {
@@ -12,20 +12,20 @@ describe('group-name-generator', () => {
   });
 
   it('tokenizes title text and removes stop words', () => {
-    const tokens = tokenizeForGroupNaming('The React docs - Getting Started | Dashboard');
+    const tokens = extractMeaningfulWordsFromText('The React docs - Getting Started | Dashboard');
     expect(tokens).toEqual(['react', 'docs', 'getting', 'started', 'dashboard']);
   });
 
   it('extracts hostname keywords from URL', () => {
-    expect(extractHostnameKeywords('https://news.ycombinator.com/item?id=1')).toEqual(['news', 'ycombinator']);
+    expect(extractKeywordsFromHostname('https://news.ycombinator.com/item?id=1')).toEqual(['news', 'ycombinator']);
   });
 
   it('returns empty hostname keywords for invalid URL', () => {
-    expect(extractHostnameKeywords('not-a-url')).toEqual([]);
+    expect(extractKeywordsFromHostname('not-a-url')).toEqual([]);
   });
 
   it('ranks repeated bigrams above sparse tokens', () => {
-    const ranked = rankNameCandidates([
+    const ranked = rankAllNameCandidatesByRelevance([
       { title: 'React Testing Library Guide', url: 'https://testing-library.com/docs' },
       { title: 'React Hooks Guide', url: 'https://react.dev/learn' },
       { title: 'React Performance Guide', url: 'https://react.dev/reference' },
@@ -35,7 +35,7 @@ describe('group-name-generator', () => {
   });
 
   it('generates a concise name with one or two words', () => {
-    const result = generateGroupNameFromTabs([
+    const result = generateBestGroupNameFromTabs([
       { title: 'Kubernetes Deployment Strategies', url: 'https://kubernetes.io/docs' },
       { title: 'Kubernetes Service Patterns', url: 'https://kubernetes.io/concepts' },
     ]);
@@ -44,7 +44,7 @@ describe('group-name-generator', () => {
   });
 
   it('uses deterministic hostname fallback when title signal is weak', () => {
-    const result = generateGroupNameFromTabs([
+    const result = generateBestGroupNameFromTabs([
       { title: 'Home', url: 'https://github.com/openai/gpt-5' },
       { title: 'Login', url: 'https://github.com/openai/codex' },
     ]);
@@ -54,17 +54,17 @@ describe('group-name-generator', () => {
   });
 
   it('uses generic fallback for empty tab context', () => {
-    const result = generateGroupNameFromTabs([]);
+    const result = generateBestGroupNameFromTabs([]);
     expect(result.name).toBe('Tabs');
     expect(result.reason).toBe('generic-fallback');
   });
 
   it('is deterministic for equal-score tie cases', () => {
-    const first = generateGroupNameFromTabs([
+    const first = generateBestGroupNameFromTabs([
       { title: 'Alpha Beta', url: 'https://a.example.com' },
       { title: 'Gamma Delta', url: 'https://g.example.com' },
     ]);
-    const second = generateGroupNameFromTabs([
+    const second = generateBestGroupNameFromTabs([
       { title: 'Alpha Beta', url: 'https://a.example.com' },
       { title: 'Gamma Delta', url: 'https://g.example.com' },
     ]);
@@ -72,7 +72,7 @@ describe('group-name-generator', () => {
   });
 
   it('handles mixed-topic groups without exceeding two words', () => {
-    const result = generateGroupNameFromTabs([
+    const result = generateBestGroupNameFromTabs([
       { title: 'React State Patterns', url: 'https://react.dev/learn' },
       { title: 'Postgres Indexing Notes', url: 'https://postgresql.org/docs' },
       { title: 'Kubernetes Autoscaling', url: 'https://kubernetes.io/docs' },
@@ -81,7 +81,7 @@ describe('group-name-generator', () => {
   });
 
   it('falls back to "Tabs" for sparse generic signals without a dominant host', () => {
-    const result = generateGroupNameFromTabs([
+    const result = generateBestGroupNameFromTabs([
       { title: 'Home', url: 'about:blank' },
       { title: 'Dashboard', url: 'about:blank' },
       { title: 'Login', url: 'about:blank' },
@@ -92,7 +92,7 @@ describe('group-name-generator', () => {
   });
 
   it('uses lexical tie-break when scores are otherwise equal', () => {
-    const ranked = rankNameCandidates([
+    const ranked = rankAllNameCandidatesByRelevance([
       { title: 'Alpha Tools', url: 'https://one.dev' },
       { title: 'Bravo Notes', url: 'https://two.dev' },
     ]);

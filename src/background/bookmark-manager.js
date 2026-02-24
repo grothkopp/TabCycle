@@ -1,202 +1,216 @@
-import { STORAGE_KEYS, BOOKMARK_BLOCKED_URLS, DEFAULT_BOOKMARK_SETTINGS, ERROR_CODES } from '../shared/constants.js';
-import { stripAgeSuffix } from './group-manager.js';
+/**
+ * Bookmarks tabs before they are closed (when they reach the GONE lifecycle stage).
+ *
+ * Closed tabs are saved into a configurable folder under "Other Bookmarks".
+ * Grouped tabs are bookmarked as a subfolder with the group's title.
+ * The folder is created on demand and its ID is cached for subsequent calls.
+ */
+
+import { STORAGE_KEYS, URLS_EXCLUDED_FROM_BOOKMARKING, DEFAULT_BOOKMARK_SETTINGS, ERROR_CODES } from '../shared/constants.js';
+import { removeAgeSuffixFromTitle } from './group-manager.js';
 import { createLogger } from '../shared/logger.js';
 
 const logger = createLogger('background');
 
-// Cached "Other Bookmarks" node ID — discovered once per service worker lifecycle
-let cachedOtherBookmarksId = null;
+/** Cached ID of the "Other Bookmarks" folder — discovered once per service worker lifecycle. */
+let cachedOtherBookmarksFolderId = null;
 
 /**
- * Discovers the "Other Bookmarks" node ID via chrome.bookmarks.getTree().
- * Caches the result for subsequent calls within the same service worker lifecycle.
- * @returns {Promise<string>} The bookmark node ID of "Other Bookmarks"
+ * Finds the "Other Bookmarks" folder in Chrome's bookmark tree.
+ * Caches the result for the lifetime of the service worker.
+ *
+ * @returns {Promise<string>} The bookmark node ID of the "Other Bookmarks" folder
  */
-export async function getOtherBookmarksId() {
-  if (cachedOtherBookmarksId) return cachedOtherBookmarksId;
+export async function findOtherBookmarksFolderId() {
+  if (cachedOtherBookmarksFolderId) return cachedOtherBookmarksFolderId;
 
-  const tree = await chrome.bookmarks.getTree();
-  const otherBookmarks = tree[0].children.find(
+  const bookmarkTree = await chrome.bookmarks.getTree();
+  const otherBookmarksNode = bookmarkTree[0].children.find(
     (node) => node.title === 'Other Bookmarks' || node.title === 'Other bookmarks'
   );
 
-  if (!otherBookmarks) {
-    // Fallback: "Other Bookmarks" is typically the second child (id "2")
-    cachedOtherBookmarksId = tree[0].children.length > 1 ? tree[0].children[1].id : tree[0].children[0].id;
+  if (!otherBookmarksNode) {
+    cachedOtherBookmarksFolderId = bookmarkTree[0].children.length > 1 ? bookmarkTree[0].children[1].id : bookmarkTree[0].children[0].id;
   } else {
-    cachedOtherBookmarksId = otherBookmarks.id;
+    cachedOtherBookmarksFolderId = otherBookmarksNode.id;
   }
 
-  return cachedOtherBookmarksId;
+  return cachedOtherBookmarksFolderId;
 }
 
 /**
- * Resolves the bookmark folder for storing closed-tab bookmarks.
- * Implements the folder lookup algorithm: stored ID → name fallback → create new.
- * Detects external renames (FR-018) and updates settings accordingly.
- * @param {object} settings - The current v1_settings object
+ * Finds or creates the bookmark folder where closed-tab bookmarks are stored.
+ *
+ * Resolution strategy:
+ *   1. Check the stored folder ID — if valid, use it
+ *   2. If the folder was renamed externally, detect and sync the new name to settings
+ *   3. Search "Other Bookmarks" children by name
+ *   4. Create a new folder if none found
+ *
+ * @param {object} settings - The current user settings (needs bookmarkFolderName)
  * @returns {Promise<string|null>} The folder's bookmark node ID, or null on failure
  */
-export async function resolveBookmarkFolder(settings) {
-  const cid = logger.correlationId();
-  const folderName = settings.bookmarkFolderName || DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME;
+export async function findOrCreateBookmarkFolderForClosedTabs(settings) {
+  const correlationId = logger.correlationId();
+  const desiredFolderName = settings.bookmarkFolderName || DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_FOLDER_NAME;
 
   try {
-    // Step 1: Read stored folder ID
-    const stored = await chrome.storage.local.get(STORAGE_KEYS.BOOKMARK_STATE);
-    const bookmarkState = stored[STORAGE_KEYS.BOOKMARK_STATE] || { folderId: null };
+    // Step 1: Check if we have a stored folder ID
+    const storedData = await chrome.storage.local.get(STORAGE_KEYS.BOOKMARK_STATE);
+    const bookmarkState = storedData[STORAGE_KEYS.BOOKMARK_STATE] || { folderId: null };
     let folderId = bookmarkState.folderId;
 
-    // Step 2: If we have a stored ID, verify it
+    // Step 2: Verify the stored folder still exists
     if (folderId) {
       try {
-        const results = await chrome.bookmarks.get(folderId);
-        const folder = results[0];
+        const folderNodes = await chrome.bookmarks.get(folderId);
+        const existingFolder = folderNodes[0];
 
-        // FR-018: Detect external rename and sync settings
-        if (folder.title !== folderName) {
+        // Detect if the user renamed the folder outside of the extension
+        if (existingFolder.title !== desiredFolderName) {
           logger.info('Bookmark folder renamed externally, syncing settings', {
-            oldName: folderName,
-            newName: folder.title,
+            oldName: desiredFolderName,
+            newName: existingFolder.title,
             folderId,
-          }, cid);
+          }, correlationId);
           const currentSettings = (await chrome.storage.local.get(STORAGE_KEYS.SETTINGS))[STORAGE_KEYS.SETTINGS];
           if (currentSettings) {
-            currentSettings.bookmarkFolderName = folder.title;
+            currentSettings.bookmarkFolderName = existingFolder.title;
             await chrome.storage.local.set({ [STORAGE_KEYS.SETTINGS]: currentSettings });
           }
         }
 
         return folderId;
       } catch {
-        // Stored ID is invalid (folder deleted) — clear and fall through
-        logger.debug('Stored bookmark folder ID invalid, falling back to name search', { folderId }, cid);
+        // Stored folder was deleted — clear and fall through to search
+        logger.debug('Stored bookmark folder ID invalid, falling back to name search', { folderId }, correlationId);
         folderId = null;
       }
     }
 
-    // Step 3: Scan "Other Bookmarks" children by name
-    const otherBookmarksId = await getOtherBookmarksId();
-    const children = await chrome.bookmarks.getChildren(otherBookmarksId);
-    const match = children.find((node) => !node.url && node.title === folderName);
+    // Step 3: Search "Other Bookmarks" children by name
+    const otherBookmarksFolderId = await findOtherBookmarksFolderId();
+    const childNodes = await chrome.bookmarks.getChildren(otherBookmarksFolderId);
+    const matchingFolder = childNodes.find((node) => !node.url && node.title === desiredFolderName);
 
-    if (match) {
-      // Found by name — persist the ID
+    if (matchingFolder) {
       await chrome.storage.local.set({
-        [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: match.id },
+        [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: matchingFolder.id },
       });
-      logger.debug('Bookmark folder found by name', { folderId: match.id, folderName }, cid);
-      return match.id;
+      logger.debug('Bookmark folder found by name', { folderId: matchingFolder.id, folderName: desiredFolderName }, correlationId);
+      return matchingFolder.id;
     }
 
-    // Step 4: Create new folder
+    // Step 4: Create a new folder
     const newFolder = await chrome.bookmarks.create({
-      parentId: otherBookmarksId,
-      title: folderName,
+      parentId: otherBookmarksFolderId,
+      title: desiredFolderName,
     });
 
     await chrome.storage.local.set({
       [STORAGE_KEYS.BOOKMARK_STATE]: { folderId: newFolder.id },
     });
-    logger.info('Bookmark folder created', { folderId: newFolder.id, folderName }, cid);
+    logger.info('Bookmark folder created', { folderId: newFolder.id, folderName: desiredFolderName }, correlationId);
     return newFolder.id;
-  } catch (err) {
+  } catch (error) {
     logger.error('Failed to resolve bookmark folder', {
-      error: err.message,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
-    }, cid);
+    }, correlationId);
     return null;
   }
 }
 
 /**
- * Checks whether a URL should be bookmarked.
- * Returns false for empty, chrome://newtab, chrome://newtab/, and about:blank.
- * @param {string} url - The tab URL to check
+ * Returns true if the URL is worth bookmarking.
+ * Empty pages, new-tab pages, and about:blank are excluded.
+ *
+ * @param {string} url - The URL to check
  * @returns {boolean} True if the URL should be bookmarked
  */
-export function isBookmarkableUrl(url) {
+export function isUrlWorthBookmarking(url) {
   if (!url) return false;
-  return !BOOKMARK_BLOCKED_URLS.includes(url);
+  return !URLS_EXCLUDED_FROM_BOOKMARKING.includes(url);
 }
 
 /**
  * Creates a bookmark for a single tab.
- * Falls back to URL as title if tab title is empty.
- * Wraps in try/catch — never throws.
- * @param {object} tab - Object with at least { title, url }
- * @param {string} parentId - The bookmark folder ID to create the bookmark in
- * @returns {Promise<boolean>} True if bookmark was created successfully
+ * Falls back to the URL as the bookmark title if the tab has no title.
+ * Never throws — returns false on failure.
+ *
+ * @param {object} tab - A tab object with { title, url } (and optionally { id })
+ * @param {string} parentFolderId - The bookmark folder ID to create the bookmark in
+ * @returns {Promise<boolean>} True if the bookmark was created successfully
  */
-export async function bookmarkTab(tab, parentId) {
-  const cid = logger.correlationId();
+export async function createBookmarkForSingleTab(tab, parentFolderId) {
+  const correlationId = logger.correlationId();
   try {
-    const title = tab.title && tab.title.trim() ? tab.title : tab.url;
+    const bookmarkTitle = tab.title && tab.title.trim() ? tab.title : tab.url;
     await chrome.bookmarks.create({
-      parentId,
-      title,
+      parentId: parentFolderId,
+      title: bookmarkTitle,
       url: tab.url,
     });
     return true;
-  } catch (err) {
+  } catch (error) {
     logger.warn('Failed to create bookmark for tab', {
       tabId: tab.id,
       url: tab.url,
-      error: err.message,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_BOOKMARK_CREATE,
-    }, cid);
+    }, correlationId);
     return false;
   }
 }
 
 /**
- * Creates a subfolder for a tab group and bookmarks each tab inside it.
- * Uses "(unnamed)" if the group title is empty.
- * Filters out non-bookmarkable URLs.
+ * Creates a subfolder for a tab group and bookmarks all its tabs inside.
+ * Uses "(unnamed)" if the group has no title. Filters out non-bookmarkable URLs.
+ *
  * @param {string} groupTitle - The tab group's title
  * @param {Array} tabs - Array of tab objects with { id, title, url }
- * @param {string} parentId - The root bookmark folder ID
+ * @param {string} parentFolderId - The root bookmark folder ID
  * @returns {Promise<{created: number, skipped: number, failed: number}>}
  */
-export async function bookmarkGroupTabs(groupTitle, tabs, parentId) {
-  const cid = logger.correlationId();
-  const cleanTitle = stripAgeSuffix(groupTitle);
-  const subfolderName = cleanTitle && cleanTitle.trim() ? cleanTitle : '(unnamed)';
-  const result = { created: 0, skipped: 0, failed: 0 };
+export async function createBookmarkSubfolderForTabGroup(groupTitle, tabs, parentFolderId) {
+  const correlationId = logger.correlationId();
+  const titleWithoutAge = removeAgeSuffixFromTitle(groupTitle);
+  const subfolderName = titleWithoutAge && titleWithoutAge.trim() ? titleWithoutAge : '(unnamed)';
+  const bookmarkingResults = { created: 0, skipped: 0, failed: 0 };
 
   try {
     const subfolder = await chrome.bookmarks.create({
-      parentId,
+      parentId: parentFolderId,
       title: subfolderName,
     });
 
     for (const tab of tabs) {
-      if (!isBookmarkableUrl(tab.url)) {
-        result.skipped++;
+      if (!isUrlWorthBookmarking(tab.url)) {
+        bookmarkingResults.skipped++;
         continue;
       }
-      const success = await bookmarkTab(tab, subfolder.id);
-      if (success) {
-        result.created++;
+      const wasCreated = await createBookmarkForSingleTab(tab, subfolder.id);
+      if (wasCreated) {
+        bookmarkingResults.created++;
       } else {
-        result.failed++;
+        bookmarkingResults.failed++;
       }
     }
 
     logger.info('Group bookmarked as subfolder', {
       groupTitle: subfolderName,
       subfolderId: subfolder.id,
-      tabsCreated: result.created,
-      tabsSkipped: result.skipped,
-      tabsFailed: result.failed,
-    }, cid);
-  } catch (err) {
+      tabsCreated: bookmarkingResults.created,
+      tabsSkipped: bookmarkingResults.skipped,
+      tabsFailed: bookmarkingResults.failed,
+    }, correlationId);
+  } catch (error) {
     logger.error('Failed to create group subfolder', {
       groupTitle: subfolderName,
-      error: err.message,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_BOOKMARK_FOLDER,
-    }, cid);
+    }, correlationId);
   }
 
-  return result;
+  return bookmarkingResults;
 }
