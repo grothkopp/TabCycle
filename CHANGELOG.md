@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.0...tabcycle-v1.1.1) (2026-02-24)
+
+
+### Documentation
+
+* **knuth:** reworked variable and function names in the style of donald knuth ([#8](https://github.com/grothkopp/TabCycle/issues/8)) ([71588ca](https://github.com/grothkopp/TabCycle/commit/71588caa02b8c242af695bb28cae82ef2e972b6e))
+
 ## [1.1.0](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.0.0...tabcycle-v1.1.0) (2026-02-23)
 
 
