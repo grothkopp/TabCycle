@@ -103,37 +103,37 @@ async function loadServiceWorker() {
   };
 
   await jest.unstable_mockModule('../../src/background/group-manager.js', () => ({
-    isSpecialGroup: jest.fn(() => false),
-    getSpecialGroupType: jest.fn(() => null),
-    removeSpecialGroupIfEmpty: jest.fn(async () => {}),
-    ungroupTab: jest.fn(async () => {}),
-    computeGroupStatus: jest.fn(() => null),
-    updateGroupColor: jest.fn(async () => {}),
-    sortTabsAndGroups: jest.fn(async () => {}),
-    dissolveUnnamedSingleTabGroups: jest.fn(async () => ({ dissolved: 0 })),
-    dissolveSpecialGroups: jest.fn(async () => ({ dissolved: 0 })),
-    autoNameEligibleGroups: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
-    applyUserEditLock: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
-    consumeExpectedExtensionTitleUpdate: jest.fn(() => false),
-    consumeExpectedExtensionColorUpdate: jest.fn(() => false),
-    stripAgeSuffix: jest.fn((title) => title),
-    formatAge: jest.fn(() => ''),
-    computeGroupAge: jest.fn(() => 0),
-    updateGroupTitlesWithAge: jest.fn(async () => {}),
-    removeAgeSuffixFromAllGroups: jest.fn(async () => {}),
+    isManagedAgingGroup: jest.fn(() => false),
+    getManagedGroupType: jest.fn(() => null),
+    removeManagedGroupIfEmpty: jest.fn(async () => {}),
+    removeTabFromItsGroup: jest.fn(async () => {}),
+    determineFreshestStatusInGroup: jest.fn(() => null),
+    updateGroupColorToMatchStatus: jest.fn(async () => {}),
+    sortTabsAndGroupsByLifecycleZone: jest.fn(async () => {}),
+    dissolveUnnamedGroupsWithOnlyOneTab: jest.fn(async () => ({ dissolved: 0 })),
+    dissolveManagedGroupsInWindow: jest.fn(async () => ({ dissolved: 0 })),
+    autoNameUnnamedGroupsWhenReady: jest.fn(async () => ({ named: 0, skipped: 0, attempted: 0 })),
+    lockAutoNamingAfterUserEdit: jest.fn(() => ({ locked: true, userEditLockUntil: Date.now() + 15000 })),
+    acknowledgeExtensionTitleChangeIfExpected: jest.fn(() => false),
+    acknowledgeExtensionColorChangeIfExpected: jest.fn(() => false),
+    removeAgeSuffixFromTitle: jest.fn((title) => title),
+    formatAgeAsShortString: jest.fn(() => ''),
+    calculateAgeOfFreshestTabInGroup: jest.fn(() => 0),
+    appendAgeToAllGroupTitles: jest.fn(async () => {}),
+    removeAgeSuffixFromAllGroupTitles: jest.fn(async () => {}),
   }));
 
   await jest.unstable_mockModule('../../src/background/time-accumulator.js', () => ({
-    initActiveTime: jest.fn(async () => {}),
-    recoverActiveTime: jest.fn(async () => {}),
-    handleFocusChange: jest.fn(async () => null),
-    persistActiveTime: jest.fn(async () => {}),
-    getCurrentActiveTime: jest.fn(async () => 5000),
-    getCachedActiveTimeState: jest.fn(async () => ({ accumulatedMs: 5000, focusStartTime: null })),
+    initializeActiveTimeInStorage: jest.fn(async () => {}),
+    recoverActiveTimeAfterRestart: jest.fn(async () => {}),
+    updateActiveTimeOnWindowFocusChange: jest.fn(async () => null),
+    saveActiveTimeToStorage: jest.fn(async () => {}),
+    getCurrentTotalActiveTimeMs: jest.fn(async () => 5000),
+    getActiveTimeSnapshot: jest.fn(async () => ({ accumulatedMs: 5000, focusStartTime: null })),
   }));
 
   await jest.unstable_mockModule('../../src/background/tab-placer.js', () => ({
-    placeNewTab: jest.fn(async () => {}),
+    placeNewlyCreatedTabNearItsContext: jest.fn(async () => {}),
   }));
 
   await import('../../src/background/service-worker.js');

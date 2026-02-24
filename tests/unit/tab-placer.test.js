@@ -23,7 +23,7 @@ globalThis.chrome = {
   },
 };
 
-const { placeNewTab } = await import('../../src/background/tab-placer.js');
+const { placeNewlyCreatedTabNearItsContext } = await import('../../src/background/tab-placer.js');
 
 describe('tab-placer', () => {
   beforeEach(() => {
@@ -40,7 +40,7 @@ describe('tab-placer', () => {
     };
     const tabMeta = {};
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     expect(chrome.tabs.get).toHaveBeenCalledWith(10);
     expect(chrome.tabs.group).toHaveBeenCalledWith(expect.objectContaining({
@@ -60,7 +60,7 @@ describe('tab-placer', () => {
     };
     const tabMeta = {};
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
     expect(chrome.tabs.group).not.toHaveBeenCalled();
@@ -79,7 +79,7 @@ describe('tab-placer', () => {
       20: { tabId: 20, windowId: 1, groupId: null, isSpecialGroup: false, pinned: false },
     };
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     expect(chrome.tabs.group).toHaveBeenCalledWith(expect.objectContaining({
       tabIds: [10, 20],
@@ -103,7 +103,7 @@ describe('tab-placer', () => {
     const windowState = {};
     const tabMeta = {};
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     expect(chrome.tabs.group).not.toHaveBeenCalled();
     expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
@@ -114,7 +114,7 @@ describe('tab-placer', () => {
     const windowState = {};
     const tabMeta = {};
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     expect(chrome.tabs.get).not.toHaveBeenCalled();
     expect(chrome.tabs.group).not.toHaveBeenCalled();
@@ -132,7 +132,7 @@ describe('tab-placer', () => {
     };
     const tabMeta = {};
 
-    await placeNewTab(newTab, 1, tabMeta, windowState);
+    await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState);
 
     // Should have tried and failed, then fallen back to leftmost
     expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
@@ -149,7 +149,7 @@ describe('tab-placer', () => {
       const tabMeta = {};
       const settings = { autoGroupEnabled: false };
 
-      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+      await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState, settings);
 
       // No grouping, no moving, no context tab lookup
       expect(chrome.tabs.get).not.toHaveBeenCalled();
@@ -171,7 +171,7 @@ describe('tab-placer', () => {
       };
       const settings = { autoGroupEnabled: true };
 
-      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+      await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState, settings);
 
       // Should group both tabs (Case 2: context ungrouped & unpinned)
       expect(chrome.tabs.group).toHaveBeenCalledWith(expect.objectContaining({
@@ -184,7 +184,7 @@ describe('tab-placer', () => {
       const windowState = {};
       const tabMeta = {};
 
-      await placeNewTab(newTab, 1, tabMeta, windowState, undefined);
+      await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState, undefined);
 
       // Should still run the placement logic (no context tab → leftmost)
       expect(chrome.tabs.move).toHaveBeenCalledWith(20, { index: 0 });
@@ -204,7 +204,7 @@ describe('tab-placer', () => {
       };
       const settings = { tabSortingEnabled: true }; // no autoGroupEnabled
 
-      await placeNewTab(newTab, 1, tabMeta, windowState, settings);
+      await placeNewlyCreatedTabNearItsContext(newTab, 1, tabMeta, windowState, settings);
 
       // Should proceed (autoGroupEnabled defaults to true when absent)
       expect(chrome.tabs.group).toHaveBeenCalled();

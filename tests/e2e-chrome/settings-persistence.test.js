@@ -336,4 +336,93 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     await sleep(500);
     await page.close();
   }, 20_000);
+
+  // ── Options page UI structure tests ───────────────────────────────────────
+
+  it('options page has Aging and Auto-Tab-Groups sections with v2 toggles', async () => {
+    const page = await h.browser.newPage();
+    await page.goto(`chrome-extension://${h.extensionId}/options/options.html`);
+    await sleep(500);
+
+    const structure = await page.evaluate(() => {
+      const ids = [
+        'aging-section', 'auto-tab-groups-section',
+        'agingEnabled', 'tabSortingEnabled', 'tabgroupSortingEnabled',
+        'tabgroupColoringEnabled', 'greenToYellowEnabled', 'yellowToRedEnabled',
+        'redToGoneEnabled', 'autoGroupEnabled', 'autoGroupNamingEnabled',
+        'yellowGroupName', 'redGroupName',
+      ];
+      return ids.reduce((acc, id) => {
+        acc[id] = document.getElementById(id) !== null;
+        return acc;
+      }, {});
+    });
+
+    for (const [_id, exists] of Object.entries(structure)) {
+      expect(exists).toBe(true);
+    }
+
+    await page.close();
+  }, 15_000);
+
+  it('disabling aging toggle greys out dependent controls', async () => {
+    const page = await h.browser.newPage();
+    await page.goto(`chrome-extension://${h.extensionId}/options/options.html`);
+    await sleep(500);
+
+    // Ensure aging starts enabled
+    const initiallyChecked = await page.evaluate(() =>
+      document.getElementById('agingEnabled').checked
+    );
+    if (!initiallyChecked) {
+      await page.click('#agingEnabled');
+      await sleep(200);
+    }
+
+    // Disable aging
+    await page.click('#agingEnabled');
+    await sleep(200);
+
+    const disabledAfterUncheck = await page.evaluate(() => {
+      const container = document.querySelector('.transitions-container');
+      return container && container.classList.contains('disabled-group');
+    });
+    expect(disabledAfterUncheck).toBe(true);
+
+    // Re-enable aging
+    await page.click('#agingEnabled');
+    await sleep(200);
+
+    const enabledAfterRecheck = await page.evaluate(() => {
+      const container = document.querySelector('.transitions-container');
+      return container && !container.classList.contains('disabled-group');
+    });
+    expect(enabledAfterRecheck).toBe(true);
+
+    await page.close();
+  }, 15_000);
+
+  it('aging details section is collapsed by default', async () => {
+    const page = await h.browser.newPage();
+    await page.goto(`chrome-extension://${h.extensionId}/options/options.html`);
+    await sleep(500);
+
+    const collapsedByDefault = await page.evaluate(() => {
+      const details = document.getElementById('aging-details');
+      return details && !details.open;
+    });
+    expect(collapsedByDefault).toBe(true);
+
+    // Click to expand
+    await page.click('#aging-details summary');
+    await sleep(200);
+
+    const expandedAfterClick = await page.evaluate(() => {
+      const details = document.getElementById('aging-details');
+      return details && details.open;
+    });
+    expect(expandedAfterClick).toBe(true);
+
+    await page.close();
+  }, 15_000);
 });

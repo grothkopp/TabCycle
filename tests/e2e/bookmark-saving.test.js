@@ -149,7 +149,7 @@ describe('Bookmark settings E2E: folder name', () => {
 
 describe('Bookmark full lifecycle E2E', () => {
   it('should create bookmark in correct folder when tab is bookmarked', async () => {
-    const { resolveBookmarkFolder, isBookmarkableUrl, bookmarkTab } = await import('../../src/background/bookmark-manager.js');
+    const { findOrCreateBookmarkFolderForClosedTabs, isUrlWorthBookmarking, createBookmarkForSingleTab } = await import('../../src/background/bookmark-manager.js');
 
     // Setup: store settings with bookmarks enabled
     const settings = {
@@ -161,15 +161,15 @@ describe('Bookmark full lifecycle E2E', () => {
     await chrome.storage.local.set({ v1_settings: settings });
 
     // Resolve the bookmark folder (creates it since none exists)
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
     expect(folderId).toBeTruthy();
 
     // Simulate a tab reaching Gone — check URL is bookmarkable
     const tab = { id: 42, title: 'Example Page', url: 'https://example.com' };
-    expect(isBookmarkableUrl(tab.url)).toBe(true);
+    expect(isUrlWorthBookmarking(tab.url)).toBe(true);
 
     // Create the bookmark
-    const success = await bookmarkTab(tab, folderId);
+    const success = await createBookmarkForSingleTab(tab, folderId);
     expect(success).toBe(true);
 
     // Verify bookmark was created via the mock
@@ -181,20 +181,20 @@ describe('Bookmark full lifecycle E2E', () => {
   });
 
   it('should skip empty tabs and not create bookmarks for them', async () => {
-    const { isBookmarkableUrl } = await import('../../src/background/bookmark-manager.js');
+    const { isUrlWorthBookmarking } = await import('../../src/background/bookmark-manager.js');
 
-    expect(isBookmarkableUrl('chrome://newtab')).toBe(false);
-    expect(isBookmarkableUrl('chrome://newtab/')).toBe(false);
-    expect(isBookmarkableUrl('about:blank')).toBe(false);
-    expect(isBookmarkableUrl('')).toBe(false);
-    expect(isBookmarkableUrl(undefined)).toBe(false);
+    expect(isUrlWorthBookmarking('chrome://newtab')).toBe(false);
+    expect(isUrlWorthBookmarking('chrome://newtab/')).toBe(false);
+    expect(isUrlWorthBookmarking('about:blank')).toBe(false);
+    expect(isUrlWorthBookmarking('')).toBe(false);
+    expect(isUrlWorthBookmarking(undefined)).toBe(false);
   });
 
   it('should persist bookmark folder ID in v1_bookmarkState after folder creation', async () => {
-    const { resolveBookmarkFolder } = await import('../../src/background/bookmark-manager.js');
+    const { findOrCreateBookmarkFolderForClosedTabs } = await import('../../src/background/bookmark-manager.js');
 
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     expect(folderId).toBeTruthy();
 

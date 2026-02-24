@@ -1,66 +1,93 @@
-import { STATUS, TIME_MODE } from '../shared/constants.js';
+/**
+ * Evaluates tab ages and determines lifecycle stage transitions.
+ *
+ * Each tab ages over time. When its age crosses a threshold, it transitions
+ * to the next lifecycle stage: GREEN → YELLOW → RED → GONE.
+ * Individual transitions can be disabled, which blocks all downstream transitions.
+ */
+
+import { TAB_LIFECYCLE_STAGE, AGE_CALCULATION_MODE } from '../shared/constants.js';
 
 /**
- * Compute the status for a tab given its age and threshold configuration.
+ * Determines which lifecycle stage a tab should be in, given its age and thresholds.
  *
- * @param {number} ageMs - The tab's age in milliseconds
- * @param {object} thresholds - Threshold values { greenToYellow, yellowToRed, redToGone }
- * @param {object} [transitionToggles] - Optional transition toggles
- * @param {boolean} [transitionToggles.greenToYellowEnabled=true]
- * @param {boolean} [transitionToggles.yellowToRedEnabled=true]
- * @param {boolean} [transitionToggles.redToGoneEnabled=true]
- * @returns {string} STATUS.GREEN | STATUS.YELLOW | STATUS.RED | STATUS.GONE
+ * Each transition must be enabled for the tab to advance past that level.
+ * If an earlier transition is disabled, all downstream transitions are also blocked.
+ * For example, if greenToYellowEnabled is false, tabs stay GREEN forever.
+ *
+ * @param {number} tabAgeInMs - How old the tab is, in milliseconds
+ * @param {object} thresholds - { greenToYellow, yellowToRed, redToGone } in ms
+ * @param {object} [transitionToggles] - Which transitions are enabled
+ * @returns {string} The lifecycle stage: 'green', 'yellow', 'red', or 'gone'
  */
-export function computeStatus(ageMs, thresholds, transitionToggles) {
-  const greenToYellowEnabled = transitionToggles?.greenToYellowEnabled !== false;
-  const yellowToRedEnabled = transitionToggles?.yellowToRedEnabled !== false;
-  const redToGoneEnabled = transitionToggles?.redToGoneEnabled !== false;
+export function determineLifecycleStage(tabAgeInMs, thresholds, transitionToggles) {
+  const isGreenToYellowEnabled = transitionToggles?.greenToYellowEnabled !== false;
+  const isYellowToRedEnabled = transitionToggles?.yellowToRedEnabled !== false;
+  const isRedToGoneEnabled = transitionToggles?.redToGoneEnabled !== false;
 
-  // Each transition must be enabled for the status to advance past that level.
-  // If an earlier transition is disabled, all downstream transitions are also blocked.
-  if (greenToYellowEnabled && ageMs >= thresholds.greenToYellow) {
-    if (yellowToRedEnabled && ageMs >= thresholds.yellowToRed) {
-      if (redToGoneEnabled && ageMs >= thresholds.redToGone) {
-        return STATUS.GONE;
+  if (isGreenToYellowEnabled && tabAgeInMs >= thresholds.greenToYellow) {
+    if (isYellowToRedEnabled && tabAgeInMs >= thresholds.yellowToRed) {
+      if (isRedToGoneEnabled && tabAgeInMs >= thresholds.redToGone) {
+        return TAB_LIFECYCLE_STAGE.GONE;
       }
-      return STATUS.RED;
+      return TAB_LIFECYCLE_STAGE.RED;
     }
-    return STATUS.YELLOW;
+    return TAB_LIFECYCLE_STAGE.YELLOW;
   }
-  return STATUS.GREEN;
+  return TAB_LIFECYCLE_STAGE.GREEN;
 }
 
-export function computeAge(tabMeta, activeTimeMs, settings) {
-  let age;
-  if (settings.timeMode === TIME_MODE.WALL_CLOCK) {
-    age = Date.now() - tabMeta.refreshWallTime;
+/**
+ * Calculates how old a tab is in milliseconds, based on the configured time mode.
+ *
+ * In ACTIVE mode: age = (current active time) - (active time when tab was last refreshed)
+ * In WALL_CLOCK mode: age = (current wall time) - (wall time when tab was last refreshed)
+ *
+ * @param {object} tabMetadata - The tab's metadata entry
+ * @param {number} currentActiveTimeMs - Current total active time in ms
+ * @param {object} settings - User settings (used to determine time mode)
+ * @returns {number} The tab's age in milliseconds (minimum 0)
+ */
+export function calculateTabAgeInMs(tabMetadata, currentActiveTimeMs, settings) {
+  let ageInMs;
+  if (settings.timeMode === AGE_CALCULATION_MODE.WALL_CLOCK) {
+    ageInMs = Date.now() - tabMetadata.refreshWallTime;
   } else {
-    age = activeTimeMs - tabMeta.refreshActiveTime;
+    ageInMs = currentActiveTimeMs - tabMetadata.refreshActiveTime;
   }
-  return Math.max(0, age);
+  return Math.max(0, ageInMs);
 }
 
-export function evaluateAllTabs(tabMeta, activeTimeMs, settings) {
-  const transitions = {};
+/**
+ * Evaluates all tracked tabs and returns which ones need to transition to a new lifecycle stage.
+ * Only returns entries for tabs whose status actually changed.
+ *
+ * @param {object} allTabMetadata - All tab metadata entries keyed by tab ID
+ * @param {number} currentActiveTimeMs - Current total active time in ms
+ * @param {object} settings - User settings (thresholds, time mode, transition toggles)
+ * @returns {object} Map of tabId → { oldStatus, newStatus } for tabs that changed
+ */
+export function findAllTabsNeedingStatusTransition(allTabMetadata, currentActiveTimeMs, settings) {
+  const tabsWithChangedStatus = {};
 
-  for (const [tabId, meta] of Object.entries(tabMeta)) {
-    if (meta.pinned) continue;
+  for (const [tabId, tabMetadata] of Object.entries(allTabMetadata)) {
+    if (tabMetadata.pinned) continue;
 
-    const age = computeAge(meta, activeTimeMs, settings);
+    const tabAge = calculateTabAgeInMs(tabMetadata, currentActiveTimeMs, settings);
     const transitionToggles = {
       greenToYellowEnabled: settings.greenToYellowEnabled,
       yellowToRedEnabled: settings.yellowToRedEnabled,
       redToGoneEnabled: settings.redToGoneEnabled,
     };
-    const newStatus = computeStatus(age, settings.thresholds, transitionToggles);
+    const newStage = determineLifecycleStage(tabAge, settings.thresholds, transitionToggles);
 
-    if (newStatus !== meta.status) {
-      transitions[tabId] = {
-        oldStatus: meta.status,
-        newStatus,
+    if (newStage !== tabMetadata.status) {
+      tabsWithChangedStatus[tabId] = {
+        oldStatus: tabMetadata.status,
+        newStatus: newStage,
       };
     }
   }
 
-  return transitions;
+  return tabsWithChangedStatus;
 }

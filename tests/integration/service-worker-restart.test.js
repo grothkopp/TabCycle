@@ -30,25 +30,25 @@ globalThis.chrome = {
 
 const { STORAGE_KEYS } = await import('../../src/shared/constants.js');
 const {
-  initActiveTime,
-  recoverActiveTime,
-  handleFocusChange,
-  getCurrentActiveTime,
-  persistActiveTime,
+  initializeActiveTimeInStorage,
+  recoverActiveTimeAfterRestart,
+  updateActiveTimeOnWindowFocusChange,
+  getCurrentTotalActiveTimeMs,
+  saveActiveTimeToStorage,
 } = await import('../../src/background/time-accumulator.js');
-const { reconcileTabs } = await import('../../src/background/tab-tracker.js');
+const { reconcileTabMetadataWithBrowserTabs } = await import('../../src/background/tab-tracker.js');
 
 describe('service-worker restart integration', () => {
   beforeEach(async () => {
     jest.clearAllMocks();
     for (const key of Object.keys(store)) delete store[key];
-    await initActiveTime();
+    await initializeActiveTimeInStorage();
   });
 
   it('should recover active time delta after simulated shutdown', async () => {
     // Simulate: user was active, then service worker shuts down
-    await handleFocusChange(1); // start focus
-    await persistActiveTime();
+    await updateActiveTimeOnWindowFocusChange(1); // start focus
+    await saveActiveTimeToStorage();
 
     // Simulate 2 seconds passing during shutdown
     const stored = store[STORAGE_KEYS.ACTIVE_TIME];
@@ -56,20 +56,20 @@ describe('service-worker restart integration', () => {
     store[STORAGE_KEYS.ACTIVE_TIME] = stored;
 
     // Recover
-    const recovered = await recoverActiveTime();
+    const recovered = await recoverActiveTimeAfterRestart();
     expect(recovered.accumulatedMs).toBeGreaterThanOrEqual(1900);
     expect(recovered.accumulatedMs).toBeLessThanOrEqual(2200);
   });
 
   it('should not add delta when no window was focused before shutdown', async () => {
-    await persistActiveTime();
+    await saveActiveTimeToStorage();
 
     // Simulate time passing but focusStartTime is null
     const stored = store[STORAGE_KEYS.ACTIVE_TIME];
     stored.lastPersistedAt = Date.now() - 5000;
     store[STORAGE_KEYS.ACTIVE_TIME] = stored;
 
-    const recovered = await recoverActiveTime();
+    const recovered = await recoverActiveTimeAfterRestart();
     expect(recovered.accumulatedMs).toBe(0);
   });
 
@@ -90,7 +90,7 @@ describe('service-worker restart integration', () => {
       { id: 2, windowId: 1, groupId: -1, pinned: false },
     ];
 
-    const result = reconcileTabs(storedMeta, chromeTabs, 5000);
+    const result = reconcileTabMetadataWithBrowserTabs(storedMeta, chromeTabs, 5000);
 
     // Tab 1: retained with original status
     expect(result[1].status).toBe('yellow');
@@ -113,8 +113,8 @@ describe('service-worker restart integration', () => {
       },
     };
 
-    await handleFocusChange(1);
-    await persistActiveTime();
+    await updateActiveTimeOnWindowFocusChange(1);
+    await saveActiveTimeToStorage();
 
     // Simulate shutdown gap
     const stored = store[STORAGE_KEYS.ACTIVE_TIME];
@@ -122,7 +122,7 @@ describe('service-worker restart integration', () => {
     store[STORAGE_KEYS.ACTIVE_TIME] = stored;
 
     // Recover active time
-    const recovered = await recoverActiveTime();
+    const recovered = await recoverActiveTimeAfterRestart();
     expect(recovered.accumulatedMs).toBeGreaterThan(0);
 
     // Reconcile tabs
@@ -132,8 +132,8 @@ describe('service-worker restart integration', () => {
     ];
 
     const tabMeta = store[STORAGE_KEYS.TAB_META];
-    const activeTimeMs = await getCurrentActiveTime();
-    const reconciled = reconcileTabs(tabMeta, chromeTabs, activeTimeMs);
+    const activeTimeMs = await getCurrentTotalActiveTimeMs();
+    const reconciled = reconcileTabMetadataWithBrowserTabs(tabMeta, chromeTabs, activeTimeMs);
 
     expect(reconciled[1].status).toBe('yellow'); // retained
     expect(reconciled[3].status).toBe('green');   // new

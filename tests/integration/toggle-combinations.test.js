@@ -42,16 +42,16 @@ globalThis.chrome = {
 };
 
 const {
-  TIME_MODE, STATUS,
+  AGE_CALCULATION_MODE, TAB_LIFECYCLE_STAGE,
 } = await import('../../src/shared/constants.js');
-const { evaluateAllTabs, computeStatus } = await import('../../src/background/status-evaluator.js');
-const { sortTabsAndGroups } = await import('../../src/background/group-manager.js');
-const { placeNewTab } = await import('../../src/background/tab-placer.js');
+const { findAllTabsNeedingStatusTransition, determineLifecycleStage } = await import('../../src/background/status-evaluator.js');
+const { sortTabsAndGroupsByLifecycleZone } = await import('../../src/background/group-manager.js');
+const { placeNewlyCreatedTabNearItsContext } = await import('../../src/background/tab-placer.js');
 
 // Helper: build settings with all v2 fields
 function buildSettings(overrides = {}) {
   return {
-    timeMode: TIME_MODE.ACTIVE,
+    timeMode: AGE_CALCULATION_MODE.ACTIVE,
     thresholds: {
       greenToYellow: 1000,
       yellowToRed: 2000,
@@ -77,7 +77,7 @@ function buildSettings(overrides = {}) {
 }
 
 // Helper: create a tab meta entry
-function tabEntry(tabId, windowId, refreshActiveTime, status = STATUS.GREEN) {
+function tabEntry(tabId, windowId, refreshActiveTime, status = TAB_LIFECYCLE_STAGE.GREEN) {
   return {
     tabId, windowId, refreshActiveTime, refreshWallTime: Date.now(),
     status, groupId: null, isSpecialGroup: false, pinned: false,
@@ -93,16 +93,16 @@ describe('toggle-combinations integration', () => {
   describe('aging off with sorting configured', () => {
     it('should produce no transitions when agingEnabled is false (evaluation skipped)', () => {
       // Even though thresholds are met, aging is off → evaluation should be skipped at caller level
-      // The evaluateAllTabs function itself runs regardless — the skip happens in service-worker.
-      // But if evaluateAllTabs IS called, transitions still compute. This tests that the gate
+      // The findAllTabsNeedingStatusTransition function itself runs regardless — the skip happens in service-worker.
+      // But if findAllTabsNeedingStatusTransition IS called, transitions still compute. This tests that the gate
       // belongs in the caller, not the evaluator.
       const settings = buildSettings({ agingEnabled: false });
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
       };
 
-      // evaluateAllTabs still produces transitions (it doesn't check agingEnabled)
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      // findAllTabsNeedingStatusTransition still produces transitions (it doesn't check agingEnabled)
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       // This proves the gate must be in the caller (service-worker), not here
       expect(Object.keys(transitions).length).toBeGreaterThanOrEqual(0);
     });
@@ -112,27 +112,27 @@ describe('toggle-combinations integration', () => {
     it('should cap at green when greenToYellowEnabled is false', () => {
       const settings = buildSettings({ greenToYellowEnabled: false });
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
       };
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       expect(transitions[1]).toBeUndefined(); // stays green
     });
 
     it('should cap at yellow when yellowToRedEnabled is false', () => {
       const settings = buildSettings({ yellowToRedEnabled: false });
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
       };
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       expect(transitions[1]).toEqual({ oldStatus: 'green', newStatus: 'yellow' });
     });
 
     it('should cap at red when redToGoneEnabled is false', () => {
       const settings = buildSettings({ redToGoneEnabled: false });
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
       };
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       expect(transitions[1]).toEqual({ oldStatus: 'green', newStatus: 'red' });
     });
 
@@ -141,22 +141,22 @@ describe('toggle-combinations integration', () => {
       const thresholds = settings.thresholds;
 
       // Tab far past all thresholds
-      const status = computeStatus(100000, thresholds, {
+      const status = determineLifecycleStage(100000, thresholds, {
         greenToYellowEnabled: false,
         yellowToRedEnabled: true,
         redToGoneEnabled: true,
       });
-      expect(status).toBe(STATUS.GREEN);
+      expect(status).toBe(TAB_LIFECYCLE_STAGE.GREEN);
     });
 
     it('should cascade: yellowToRed off blocks red→gone', () => {
       const thresholds = { greenToYellow: 1000, yellowToRed: 2000, redToGone: 3000 };
-      const status = computeStatus(100000, thresholds, {
+      const status = determineLifecycleStage(100000, thresholds, {
         greenToYellowEnabled: true,
         yellowToRedEnabled: false,
         redToGoneEnabled: true,
       });
-      expect(status).toBe(STATUS.YELLOW);
+      expect(status).toBe(TAB_LIFECYCLE_STAGE.YELLOW);
     });
 
     it('should handle all transitions disabled — everything stays green', () => {
@@ -166,10 +166,10 @@ describe('toggle-combinations integration', () => {
         redToGoneEnabled: false,
       });
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
-        2: tabEntry(2, 1, 0, STATUS.GREEN),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
+        2: tabEntry(2, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
       };
-      const transitions = evaluateAllTabs(tabMeta, 100000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 100000, settings);
       expect(transitions[1]).toBeUndefined();
       expect(transitions[2]).toBeUndefined();
     });
@@ -177,12 +177,12 @@ describe('toggle-combinations integration', () => {
     it('should handle mixed tabs with partial transitions', () => {
       const settings = buildSettings({ redToGoneEnabled: false });
       const tabMeta = {
-        1: tabEntry(1, 1, 4600, STATUS.GREEN),  // age 400 — stays green (below 1000 threshold)
-        2: tabEntry(2, 1, 0, STATUS.GREEN),      // age 5000 — green→red (past yellowToRed)
-        3: tabEntry(3, 1, 3500, STATUS.YELLOW),  // age 1500 — stays yellow (below yellowToRed=2000)
-        4: tabEntry(4, 1, 0, STATUS.RED),        // age 5000 — stays red (redToGone disabled, past yellowToRed so computeStatus=red)
+        1: tabEntry(1, 1, 4600, TAB_LIFECYCLE_STAGE.GREEN),  // age 400 — stays green (below 1000 threshold)
+        2: tabEntry(2, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),      // age 5000 — green→red (past yellowToRed)
+        3: tabEntry(3, 1, 3500, TAB_LIFECYCLE_STAGE.YELLOW),  // age 1500 — stays yellow (below yellowToRed=2000)
+        4: tabEntry(4, 1, 0, TAB_LIFECYCLE_STAGE.RED),        // age 5000 — stays red (redToGone disabled, past yellowToRed so determineLifecycleStage=red)
       };
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       expect(transitions[1]).toBeUndefined();
       expect(transitions[2]).toEqual({ oldStatus: 'green', newStatus: 'red' });
       expect(transitions[3]).toBeUndefined();
@@ -191,7 +191,7 @@ describe('toggle-combinations integration', () => {
   });
 
   describe('tab sorting off but tabgroup sorting on', () => {
-    it('should call sortTabsAndGroups with settings where tabSortingEnabled=false', async () => {
+    it('should call sortTabsAndGroupsByLifecycleZone with settings where tabSortingEnabled=false', async () => {
       const settings = buildSettings({
         tabSortingEnabled: false,
         tabgroupSortingEnabled: true,
@@ -204,7 +204,7 @@ describe('toggle-combinations integration', () => {
       const windowState = {
         1: {
           specialGroups: { yellow: null, red: null },
-          groupZones: { 201: STATUS.GREEN },
+          groupZones: { 201: TAB_LIFECYCLE_STAGE.GREEN },
           groupNaming: {},
         },
       };
@@ -217,9 +217,9 @@ describe('toggle-combinations integration', () => {
         { id: 201, windowId: 1, title: 'Dev', color: 'blue' },
       ]);
 
-      // sortTabsAndGroups should not create special groups when tabSortingEnabled=false
+      // sortTabsAndGroupsByLifecycleZone should not create special groups when tabSortingEnabled=false
       // but should still zone-sort user groups when tabgroupSortingEnabled=true
-      await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       // No tabs.group calls (no special group creation)
       expect(chrome.tabs.group).not.toHaveBeenCalled();
@@ -229,7 +229,7 @@ describe('toggle-combinations integration', () => {
   describe('age clock continuity', () => {
     it('should preserve refreshActiveTime and refreshWallTime when aging toggled off then on', () => {
       const tabMeta = {
-        1: tabEntry(1, 1, 500, STATUS.GREEN),
+        1: tabEntry(1, 1, 500, TAB_LIFECYCLE_STAGE.GREEN),
       };
 
       const originalActiveTime = tabMeta[1].refreshActiveTime;
@@ -257,12 +257,12 @@ describe('toggle-combinations integration', () => {
       // Tab that's been idle for a very long time (way past gone)
       const tabMeta = {
         1: {
-          ...tabEntry(1, 1, 0, STATUS.GREEN),
+          ...tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
           refreshWallTime: now - 500000, // far in the past
           refreshActiveTime: 0,          // far in the past
         },
         2: {
-          ...tabEntry(2, 1, currentActiveTime - 1000, STATUS.GREEN),
+          ...tabEntry(2, 1, currentActiveTime - 1000, TAB_LIFECYCLE_STAGE.GREEN),
           refreshWallTime: now - 1000, // recent — should NOT be capped
         },
       };
@@ -307,7 +307,7 @@ describe('toggle-combinations integration', () => {
 
       const tabMeta = {
         1: {
-          ...tabEntry(1, 1, currentActiveTime - 2000, STATUS.YELLOW),
+          ...tabEntry(1, 1, currentActiveTime - 2000, TAB_LIFECYCLE_STAGE.YELLOW),
           refreshWallTime: now - 2000,
         },
       };
@@ -340,7 +340,7 @@ describe('toggle-combinations integration', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {}, groupNaming: {} },
       };
 
-      await placeNewTab(tab, 1, tabMeta, windowState, settings);
+      await placeNewlyCreatedTabNearItsContext(tab, 1, tabMeta, windowState, settings);
 
       // No group created
       expect(chrome.tabs.group).not.toHaveBeenCalled();
@@ -368,7 +368,7 @@ describe('toggle-combinations integration', () => {
         1: { specialGroups: { yellow: null, red: null }, groupZones: {}, groupNaming: {} },
       };
 
-      await placeNewTab(tab, 1, tabMeta, windowState, settings);
+      await placeNewlyCreatedTabNearItsContext(tab, 1, tabMeta, windowState, settings);
 
       // Auto-group should still work (autoGroupEnabled is true)
       // The actual call depends on the opener tab being ungrouped with the new tab
@@ -402,7 +402,7 @@ describe('toggle-combinations integration', () => {
       const windowState = {
         1: {
           specialGroups: { yellow: null, red: null },
-          groupZones: { 301: STATUS.GREEN },
+          groupZones: { 301: TAB_LIFECYCLE_STAGE.GREEN },
           groupNaming: {},
         },
       };
@@ -414,7 +414,7 @@ describe('toggle-combinations integration', () => {
         { id: 301, windowId: 1, title: 'Test', color: 'blue' },
       ]);
 
-      await sortTabsAndGroups(1, tabMeta, windowState, undefined, settings);
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined, settings);
 
       // No special group creation (tabSortingEnabled=false)
       expect(chrome.tabs.group).not.toHaveBeenCalled();
@@ -425,13 +425,13 @@ describe('toggle-combinations integration', () => {
     it('should evaluate transitions correctly with all toggles enabled (backward compat)', () => {
       const settings = buildSettings(); // all defaults: true
       const tabMeta = {
-        1: tabEntry(1, 1, 0, STATUS.GREEN),
-        2: tabEntry(2, 1, 0, STATUS.YELLOW),
-        3: tabEntry(3, 1, 0, STATUS.RED),
+        1: tabEntry(1, 1, 0, TAB_LIFECYCLE_STAGE.GREEN),
+        2: tabEntry(2, 1, 0, TAB_LIFECYCLE_STAGE.YELLOW),
+        3: tabEntry(3, 1, 0, TAB_LIFECYCLE_STAGE.RED),
       };
 
       // currentActiveTime = 5000, all thresholds crossed
-      const transitions = evaluateAllTabs(tabMeta, 5000, settings);
+      const transitions = findAllTabsNeedingStatusTransition(tabMeta, 5000, settings);
       expect(transitions[1]).toEqual({ oldStatus: 'green', newStatus: 'gone' });
       expect(transitions[2]).toEqual({ oldStatus: 'yellow', newStatus: 'gone' });
       expect(transitions[3]).toEqual({ oldStatus: 'red', newStatus: 'gone' });

@@ -1,129 +1,169 @@
-import { SPECIAL_GROUP_TYPES, ERROR_CODES, STATUS } from '../shared/constants.js';
-import { computeAge } from './status-evaluator.js';
+/**
+ * Manages Chrome tab groups created and maintained by the TabCycle extension.
+ *
+ * This module handles:
+ *   - "Managed groups": the yellow and red groups that hold aging tabs
+ *   - Group sorting: arranging groups into lifecycle zones (green → yellow → red)
+ *   - Group color updates: coloring groups to match their lifecycle stage
+ *   - Auto-naming: generating descriptive names for unnamed groups after a delay
+ *   - Age display: appending age suffixes like "(2h)" to group titles
+ *   - Dissolution: removing single-tab unnamed groups to keep the tab bar tidy
+ */
+
+import { MANAGED_GROUP_TYPES, ERROR_CODES, TAB_LIFECYCLE_STAGE } from '../shared/constants.js';
+import { calculateTabAgeInMs } from './status-evaluator.js';
 import { createLogger } from '../shared/logger.js';
-import { generateGroupNameFromTabs } from './group-name-generator.js';
+import { generateBestGroupNameFromTabs } from './group-name-generator.js';
 
 const logger = createLogger('background');
 
-const AUTO_NAME_DEFAULT_DELAY_MINUTES = 5;
-const EXTENSION_TITLE_UPDATE_TTL_MS = 10_000;
-const extensionTitleUpdates = new Map(); // groupId -> { title, expiresAt }
-const extensionColorUpdates = new Map(); // groupId -> { color, expiresAt }
+const DEFAULT_AUTO_NAMING_DELAY_MINUTES = 5;
+const TITLE_UPDATE_TRACKING_EXPIRY_MS = 10_000;
 
-// Track groups created by our extension (eligible for auto-dissolution)
-const extensionCreatedGroups = new Set();
+/**
+ * Tracks title changes initiated by this extension (keyed by groupId).
+ * Used to distinguish extension-initiated title changes from user edits
+ * in the onGroupUpdated handler.
+ */
+const pendingExtensionTitleChanges = new Map();
 
-export function trackExtensionGroup(groupId) {
-  extensionCreatedGroups.add(groupId);
+/**
+ * Tracks color changes initiated by this extension (keyed by groupId).
+ * Same purpose as title tracking — prevents false "user edit" detection.
+ */
+const pendingExtensionColorChanges = new Map();
+
+/**
+ * Set of group IDs that were created by this extension (not by the user).
+ * Only extension-created groups are eligible for auto-dissolution.
+ */
+const groupsCreatedByExtension = new Set();
+
+/** Records that a group was created by this extension. */
+export function markGroupAsCreatedByExtension(groupId) {
+  groupsCreatedByExtension.add(groupId);
   logger.debug('Tracking extension-created group', { groupId });
 }
 
-export function untrackExtensionGroup(groupId) {
-  extensionCreatedGroups.delete(groupId);
+/** Removes a group from the extension-created tracking set. */
+export function unmarkGroupAsCreatedByExtension(groupId) {
+  groupsCreatedByExtension.delete(groupId);
 }
 
-export function isExtensionCreatedGroup(groupId) {
-  return extensionCreatedGroups.has(groupId);
+/** Returns true if this group was created by the extension (not by the user). */
+export function wasGroupCreatedByExtension(groupId) {
+  return groupsCreatedByExtension.has(groupId);
 }
 
-// Pending dissolutions: groups that need dissolving but couldn't because of a drag lock
-const pendingDissolutions = new Map(); // groupId → { tabId, windowId, tabMeta, startTime }
-let dissolutionInterval = null;
+// ─── Drag-Lock Dissolution Retry ──────────────────────────────────────────────
+// When Chrome has a drag operation in progress, tabs "cannot be edited".
+// We retry dissolution every 300ms until the drag completes or 10 seconds elapse.
 
-async function processPendingDissolutions() {
-  if (pendingDissolutions.size === 0) {
-    clearInterval(dissolutionInterval);
-    dissolutionInterval = null;
+const groupsAwaitingDissolutionAfterDragLock = new Map();
+let dissolutionRetryIntervalId = null;
+
+async function retryDissolvingGroupsBlockedByDragLock() {
+  if (groupsAwaitingDissolutionAfterDragLock.size === 0) {
+    clearInterval(dissolutionRetryIntervalId);
+    dissolutionRetryIntervalId = null;
     return;
   }
 
-  for (const [groupId, info] of pendingDissolutions) {
-    // Give up after 10 seconds
-    if (Date.now() - info.startTime > 10000) {
-      logger.warn('Giving up on pending dissolution after timeout', { groupId, tabId: info.tabId });
-      pendingDissolutions.delete(groupId);
+  for (const [groupId, retryInfo] of groupsAwaitingDissolutionAfterDragLock) {
+    if (Date.now() - retryInfo.startTime > 10000) {
+      logger.warn('Giving up on pending dissolution after timeout', { groupId, tabId: retryInfo.tabId });
+      groupsAwaitingDissolutionAfterDragLock.delete(groupId);
       continue;
     }
 
     try {
-      await chrome.tabs.ungroup(info.tabId);
-      // Success — update meta from fresh state
-      const { readState, batchWrite } = await import('./state-persistence.js');
+      await chrome.tabs.ungroup(retryInfo.tabId);
+      const { readValidatedStateFromStorage, writeMultipleStateEntries } = await import('./state-persistence.js');
       const { STORAGE_KEYS } = await import('../shared/constants.js');
-      const state = await readState([STORAGE_KEYS.TAB_META]);
-      const tabMeta = state[STORAGE_KEYS.TAB_META] || {};
-      const meta = tabMeta[info.tabId] || tabMeta[String(info.tabId)];
-      if (meta) {
-        meta.groupId = null;
-        meta.isSpecialGroup = false;
+      const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const tabEntry = tabMeta[retryInfo.tabId] || tabMeta[String(retryInfo.tabId)];
+      if (tabEntry) {
+        tabEntry.groupId = null;
+        tabEntry.isSpecialGroup = false;
       }
-      await batchWrite({ [STORAGE_KEYS.TAB_META]: tabMeta });
-      extensionCreatedGroups.delete(groupId);
-      pendingDissolutions.delete(groupId);
+      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      groupsCreatedByExtension.delete(groupId);
+      groupsAwaitingDissolutionAfterDragLock.delete(groupId);
       logger.debug('Dissolved pending single-tab group after drag', {
-        groupId, tabId: info.tabId, windowId: info.windowId,
+        groupId, tabId: retryInfo.tabId, windowId: retryInfo.windowId,
       });
-    } catch (err) {
-      if (err.message && err.message.includes('cannot be edited')) {
+    } catch (error) {
+      if (error.message && error.message.includes('cannot be edited')) {
         // Still dragging — will retry on next interval tick
       } else {
-        // Different error — give up on this one
         logger.warn('Failed pending dissolution with unexpected error', {
-          groupId, tabId: info.tabId, error: err.message,
+          groupId, tabId: retryInfo.tabId, error: error.message,
         });
-        pendingDissolutions.delete(groupId);
+        groupsAwaitingDissolutionAfterDragLock.delete(groupId);
       }
     }
   }
 
-  if (pendingDissolutions.size === 0) {
-    clearInterval(dissolutionInterval);
-    dissolutionInterval = null;
+  if (groupsAwaitingDissolutionAfterDragLock.size === 0) {
+    clearInterval(dissolutionRetryIntervalId);
+    dissolutionRetryIntervalId = null;
   }
 }
 
-function scheduleDissolution(groupId, tabId, windowId) {
-  pendingDissolutions.set(groupId, { tabId, windowId, startTime: Date.now() });
-  if (!dissolutionInterval) {
-    dissolutionInterval = setInterval(processPendingDissolutions, 300);
+function scheduleGroupDissolutionRetry(groupId, tabId, windowId) {
+  groupsAwaitingDissolutionAfterDragLock.set(groupId, { tabId, windowId, startTime: Date.now() });
+  if (!dissolutionRetryIntervalId) {
+    dissolutionRetryIntervalId = setInterval(retryDissolvingGroupsBlockedByDragLock, 300);
   }
 }
 
-// Colors are identity-based and remain hardcoded. Titles come from settings.
-const GROUP_CONFIG = {
-  [SPECIAL_GROUP_TYPES.YELLOW]: { color: 'yellow' },
-  [SPECIAL_GROUP_TYPES.RED]: { color: 'red' },
+// ─── Managed Group Configuration ──────────────────────────────────────────────
+
+/** Visual configuration for managed groups. Colors are identity-based and fixed. */
+const MANAGED_GROUP_VISUAL_CONFIG = {
+  [MANAGED_GROUP_TYPES.YELLOW]: { color: 'yellow' },
+  [MANAGED_GROUP_TYPES.RED]: { color: 'red' },
 };
 
-/**
- * Get the title for a special group type from settings, falling back to empty string.
- */
-function getSpecialGroupTitle(type, settings) {
-  if (type === SPECIAL_GROUP_TYPES.YELLOW) {
+/** Gets the title for a managed group type from settings, falling back to empty string. */
+function getTitleForManagedGroupType(groupType, settings) {
+  if (groupType === MANAGED_GROUP_TYPES.YELLOW) {
     return settings?.yellowGroupName ?? '';
   }
-  if (type === SPECIAL_GROUP_TYPES.RED) {
+  if (groupType === MANAGED_GROUP_TYPES.RED) {
     return settings?.redGroupName ?? '';
   }
   return '';
 }
 
-export function isSpecialGroup(groupId, windowId, windowState) {
+/**
+ * Returns true if the given group ID is one of the extension-managed aging groups
+ * (the yellow or red special group) for the specified window.
+ */
+export function isManagedAgingGroup(groupId, windowId, windowState) {
   if (groupId === null || groupId === undefined) return false;
-  const ws = windowState[windowId] || windowState[String(windowId)];
-  if (!ws || !ws.specialGroups) return false;
-  return ws.specialGroups.yellow === groupId || ws.specialGroups.red === groupId;
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
+  if (!windowEntry || !windowEntry.specialGroups) return false;
+  return windowEntry.specialGroups.yellow === groupId || windowEntry.specialGroups.red === groupId;
 }
 
-export function getSpecialGroupType(groupId, windowId, windowState) {
-  const ws = windowState[windowId] || windowState[String(windowId)];
-  if (!ws || !ws.specialGroups) return null;
-  if (ws.specialGroups.yellow === groupId) return SPECIAL_GROUP_TYPES.YELLOW;
-  if (ws.specialGroups.red === groupId) return SPECIAL_GROUP_TYPES.RED;
+/**
+ * Returns which type ('yellow' or 'red') of managed group this is, or null if it's not managed.
+ */
+export function getManagedGroupType(groupId, windowId, windowState) {
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
+  if (!windowEntry || !windowEntry.specialGroups) return null;
+  if (windowEntry.specialGroups.yellow === groupId) return MANAGED_GROUP_TYPES.YELLOW;
+  if (windowEntry.specialGroups.red === groupId) return MANAGED_GROUP_TYPES.RED;
   return null;
 }
 
-function ensureWindowState(windowId, windowState) {
+/**
+ * Ensures that a window state entry exists for the given window,
+ * creating a default one if needed.
+ */
+function ensureWindowStateEntryExists(windowId, windowState) {
   const key = windowId;
   if (!windowState[key]) {
     windowState[key] = {
@@ -137,107 +177,142 @@ function ensureWindowState(windowId, windowState) {
   return windowState[key];
 }
 
-function asPositiveTimestamp(value, fallback) {
+/**
+ * Returns the value if it's a valid positive timestamp, otherwise returns the fallback.
+ */
+function asPositiveTimestampOrFallback(value, fallback) {
   if (Number.isFinite(value) && value > 0) return value;
   return fallback;
 }
 
-function normalizeCandidate(candidate) {
-  if (typeof candidate !== 'string') return null;
-  const words = candidate.trim().split(/\s+/).filter(Boolean).slice(0, 2);
+/**
+ * Normalizes a candidate name to at most two words, or returns null if empty.
+ */
+function normalizeCandidateToOneOrTwoWords(candidateName) {
+  if (typeof candidateName !== 'string') return null;
+  const words = candidateName.trim().split(/\s+/).filter(Boolean).slice(0, 2);
   if (words.length === 0) return null;
   return words.join(' ');
 }
 
-function normalizeGroupNamingEntry(entry, nowMs) {
-  const now = asPositiveTimestamp(nowMs, Date.now());
+/**
+ * Normalizes a group naming metadata entry, filling in defaults for missing/invalid fields.
+ */
+function normalizeGroupNamingMetadata(rawEntry, currentTimestamp) {
+  const now = asPositiveTimestampOrFallback(currentTimestamp, Date.now());
   return {
-    firstUnnamedSeenAt: asPositiveTimestamp(entry?.firstUnnamedSeenAt, now),
-    lastAutoNamedAt: Number.isFinite(entry?.lastAutoNamedAt) && entry.lastAutoNamedAt > 0
-      ? entry.lastAutoNamedAt
+    firstUnnamedSeenAt: asPositiveTimestampOrFallback(rawEntry?.firstUnnamedSeenAt, now),
+    lastAutoNamedAt: Number.isFinite(rawEntry?.lastAutoNamedAt) && rawEntry.lastAutoNamedAt > 0
+      ? rawEntry.lastAutoNamedAt
       : null,
-    lastCandidate: normalizeCandidate(entry?.lastCandidate),
-    userEditLockUntil: asPositiveTimestamp(entry?.userEditLockUntil, now),
+    lastCandidate: normalizeCandidateToOneOrTwoWords(rawEntry?.lastCandidate),
+    userEditLockUntil: asPositiveTimestampOrFallback(rawEntry?.userEditLockUntil, now),
   };
 }
 
-function getGroupNamingEntry(ws, groupId) {
-  return ws.groupNaming[groupId] || ws.groupNaming[String(groupId)] || null;
+function getGroupNamingMetadata(windowEntry, groupId) {
+  return windowEntry.groupNaming[groupId] || windowEntry.groupNaming[String(groupId)] || null;
 }
 
-function setGroupNamingEntry(ws, groupId, entry) {
-  ws.groupNaming[String(groupId)] = entry;
+function setGroupNamingMetadata(windowEntry, groupId, metadata) {
+  windowEntry.groupNaming[String(groupId)] = metadata;
 }
 
-function removeGroupNamingEntry(ws, groupId) {
-  delete ws.groupNaming[groupId];
-  delete ws.groupNaming[String(groupId)];
+function removeGroupNamingMetadata(windowEntry, groupId) {
+  delete windowEntry.groupNaming[groupId];
+  delete windowEntry.groupNaming[String(groupId)];
 }
 
-function pruneExtensionTitleUpdates(nowMs = Date.now()) {
-  for (const [groupId, entry] of extensionTitleUpdates.entries()) {
-    if (entry.expiresAt <= nowMs) {
-      extensionTitleUpdates.delete(groupId);
+// ─── Extension Update Tracking ────────────────────────────────────────────────
+// These track title/color changes made by the extension itself, so the
+// onGroupUpdated handler can tell them apart from user edits.
+
+function removeExpiredTitleChangeRecords(currentTime = Date.now()) {
+  for (const [groupId, record] of pendingExtensionTitleChanges.entries()) {
+    if (record.expiresAt <= currentTime) {
+      pendingExtensionTitleChanges.delete(groupId);
     }
   }
 }
 
-function markExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
-  pruneExtensionTitleUpdates(nowMs);
-  extensionTitleUpdates.set(groupId, {
-    title,
-    expiresAt: nowMs + EXTENSION_TITLE_UPDATE_TTL_MS,
+function recordPendingExtensionTitleChange(groupId, newTitle, currentTime = Date.now()) {
+  removeExpiredTitleChangeRecords(currentTime);
+  pendingExtensionTitleChanges.set(groupId, {
+    title: newTitle,
+    expiresAt: currentTime + TITLE_UPDATE_TRACKING_EXPIRY_MS,
   });
 }
 
-function pruneExtensionColorUpdates(nowMs = Date.now()) {
-  for (const [groupId, entry] of extensionColorUpdates.entries()) {
-    if (entry.expiresAt <= nowMs) {
-      extensionColorUpdates.delete(groupId);
+function removeExpiredColorChangeRecords(currentTime = Date.now()) {
+  for (const [groupId, record] of pendingExtensionColorChanges.entries()) {
+    if (record.expiresAt <= currentTime) {
+      pendingExtensionColorChanges.delete(groupId);
     }
   }
 }
 
-function markExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
-  pruneExtensionColorUpdates(nowMs);
-  extensionColorUpdates.set(groupId, {
-    color,
-    expiresAt: nowMs + EXTENSION_TITLE_UPDATE_TTL_MS,
+function recordPendingExtensionColorChange(groupId, newColor, currentTime = Date.now()) {
+  removeExpiredColorChangeRecords(currentTime);
+  pendingExtensionColorChanges.set(groupId, {
+    color: newColor,
+    expiresAt: currentTime + TITLE_UPDATE_TRACKING_EXPIRY_MS,
   });
 }
 
-export function consumeExpectedExtensionTitleUpdate(groupId, title, nowMs = Date.now()) {
-  pruneExtensionTitleUpdates(nowMs);
-  const entry = extensionTitleUpdates.get(groupId);
-  if (!entry) return false;
-  if (typeof title === 'string' && entry.title !== title) return false;
-  extensionTitleUpdates.delete(groupId);
+/**
+ * Checks if the given title change was initiated by the extension.
+ * If so, consumes the tracking record and returns true.
+ * Used by onGroupUpdated to avoid treating our own changes as user edits.
+ */
+export function acknowledgeExtensionTitleChangeIfExpected(groupId, title, currentTime = Date.now()) {
+  removeExpiredTitleChangeRecords(currentTime);
+  const record = pendingExtensionTitleChanges.get(groupId);
+  if (!record) return false;
+  if (typeof title === 'string' && record.title !== title) return false;
+  pendingExtensionTitleChanges.delete(groupId);
   return true;
 }
 
-export function consumeExpectedExtensionColorUpdate(groupId, color, nowMs = Date.now()) {
-  pruneExtensionColorUpdates(nowMs);
-  const entry = extensionColorUpdates.get(groupId);
-  if (!entry) return false;
-  if (typeof color === 'string' && entry.color !== color) return false;
-  extensionColorUpdates.delete(groupId);
+/**
+ * Checks if the given color change was initiated by the extension.
+ * If so, consumes the tracking record and returns true.
+ */
+export function acknowledgeExtensionColorChangeIfExpected(groupId, color, currentTime = Date.now()) {
+  removeExpiredColorChangeRecords(currentTime);
+  const record = pendingExtensionColorChanges.get(groupId);
+  if (!record) return false;
+  if (typeof color === 'string' && record.color !== color) return false;
+  pendingExtensionColorChanges.delete(groupId);
   return true;
 }
 
-export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCreation, settings) {
-  const ws = ensureWindowState(windowId, windowState);
-  const existingGroupId = ws.specialGroups[type];
+// ─── Managed Group Lifecycle ──────────────────────────────────────────────────
+
+/**
+ * Ensures that a managed aging group (yellow or red) exists for the given window.
+ * Creates a new one if needed, or validates the existing one is still alive.
+ *
+ * @param {number} windowId - The Chrome window ID
+ * @param {string} groupType - 'yellow' or 'red'
+ * @param {object} windowState - The per-window state object
+ * @param {number} tabIdForCreation - A tab ID to seed the group with (needed for chrome.tabs.group)
+ * @param {object} settings - User settings (for group title)
+ * @returns {Promise<{groupId: number|null, created: boolean}>}
+ */
+export async function ensureManagedGroupExists(windowId, groupType, windowState, tabIdForCreation, settings) {
+  const windowEntry = ensureWindowStateEntryExists(windowId, windowState);
+  const existingGroupId = windowEntry.specialGroups[groupType];
 
   if (existingGroupId !== null) {
     try {
-      const tabs = await chrome.tabs.query({ groupId: existingGroupId });
-      if (tabs.length > 0) {
+      const tabsInGroup = await chrome.tabs.query({ groupId: existingGroupId });
+      if (tabsInGroup.length > 0) {
         return { groupId: existingGroupId, created: false };
       }
     } catch {
       // Group may not exist anymore
     }
-    ws.specialGroups[type] = null;
+    windowEntry.specialGroups[groupType] = null;
   }
 
   if (!tabIdForCreation) {
@@ -245,58 +320,67 @@ export async function ensureSpecialGroup(windowId, type, windowState, tabIdForCr
   }
 
   try {
-    const config = GROUP_CONFIG[type];
-    const title = getSpecialGroupTitle(type, settings);
-    const groupId = await chrome.tabs.group({ tabIds: [tabIdForCreation], createProperties: { windowId } });
-    await chrome.tabGroups.update(groupId, {
-      title,
-      color: config.color,
+    const visualConfig = MANAGED_GROUP_VISUAL_CONFIG[groupType];
+    const groupTitle = getTitleForManagedGroupType(groupType, settings);
+    const newGroupId = await chrome.tabs.group({ tabIds: [tabIdForCreation], createProperties: { windowId } });
+    await chrome.tabGroups.update(newGroupId, {
+      title: groupTitle,
+      color: visualConfig.color,
       collapsed: false,
     });
-    ws.specialGroups[type] = groupId;
-    logger.info('Created special group', { windowId, type, groupId });
-    return { groupId, created: true };
-  } catch (err) {
+    windowEntry.specialGroups[groupType] = newGroupId;
+    logger.info('Created special group', { windowId, type: groupType, groupId: newGroupId });
+    return { groupId: newGroupId, created: true };
+  } catch (error) {
     logger.error('Failed to create special group', {
       windowId,
-      type,
-      error: err.message,
+      type: groupType,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_GROUP_CREATE,
     });
     return { groupId: null, created: false };
   }
 }
 
-export async function removeSpecialGroupIfEmpty(windowId, type, windowState) {
-  const ws = windowState[windowId] || windowState[String(windowId)];
-  if (!ws || !ws.specialGroups) return { removed: false };
+/**
+ * Removes the managed group reference if the group has become empty.
+ * This happens when all tabs in a managed group navigate (resetting to green) or are closed.
+ */
+export async function removeManagedGroupIfEmpty(windowId, groupType, windowState) {
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
+  if (!windowEntry || !windowEntry.specialGroups) return { removed: false };
 
-  const groupId = ws.specialGroups[type];
+  const groupId = windowEntry.specialGroups[groupType];
   if (groupId === null || groupId === undefined) return { removed: false };
 
   try {
-    const tabs = await chrome.tabs.query({ groupId });
-    if (tabs.length === 0) {
-      ws.specialGroups[type] = null;
-      logger.info('Removed empty special group reference', { windowId, type, groupId });
+    const tabsRemaining = await chrome.tabs.query({ groupId });
+    if (tabsRemaining.length === 0) {
+      windowEntry.specialGroups[groupType] = null;
+      logger.info('Removed empty special group reference', { windowId, type: groupType, groupId });
       return { removed: true };
     }
     return { removed: false };
   } catch {
-    ws.specialGroups[type] = null;
+    windowEntry.specialGroups[groupType] = null;
     return { removed: true };
   }
 }
 
-export async function moveTabToSpecialGroup(tabId, type, windowId, windowState, settings) {
-  const ws = ensureWindowState(windowId, windowState);
-  const ensured = await ensureSpecialGroup(windowId, type, windowState, tabId, settings);
-  let groupId = ensured.groupId;
+/**
+ * Moves a tab into the specified managed aging group (yellow or red).
+ * Creates the group if it doesn't exist. Handles the edge case where
+ * the group is deleted between validation and the move attempt.
+ */
+export async function moveTabToManagedGroup(tabId, groupType, windowId, windowState, settings) {
+  const windowEntry = ensureWindowStateEntryExists(windowId, windowState);
+  const ensured = await ensureManagedGroupExists(windowId, groupType, windowState, tabId, settings);
+  let targetGroupId = ensured.groupId;
 
-  if (groupId === null) {
+  if (targetGroupId === null) {
     logger.warn('Could not create special group for tab move', {
       tabId,
-      type,
+      type: groupType,
       windowId,
       errorCode: ERROR_CODES.ERR_GROUP_CREATE,
     });
@@ -304,31 +388,30 @@ export async function moveTabToSpecialGroup(tabId, type, windowId, windowState, 
   }
 
   if (ensured.created) {
-    return { success: true, groupId };
+    return { success: true, groupId: targetGroupId };
   }
 
   try {
-    await chrome.tabs.group({ tabIds: [tabId], groupId });
-    logger.debug('Moved tab to special group', { tabId, type, groupId });
-    return { success: true, groupId };
-  } catch (err) {
-    // Group may have been deleted between validation and move.
-    if (err?.message?.includes('No group with id')) {
-      ws.specialGroups[type] = null;
-      const retry = await ensureSpecialGroup(windowId, type, windowState, tabId, settings);
-      groupId = retry.groupId;
-      if (groupId !== null) {
-        if (retry.created) return { success: true, groupId };
+    await chrome.tabs.group({ tabIds: [tabId], groupId: targetGroupId });
+    logger.debug('Moved tab to special group', { tabId, type: groupType, groupId: targetGroupId });
+    return { success: true, groupId: targetGroupId };
+  } catch (error) {
+    if (error?.message?.includes('No group with id')) {
+      windowEntry.specialGroups[groupType] = null;
+      const retryResult = await ensureManagedGroupExists(windowId, groupType, windowState, tabId, settings);
+      targetGroupId = retryResult.groupId;
+      if (targetGroupId !== null) {
+        if (retryResult.created) return { success: true, groupId: targetGroupId };
         try {
-          await chrome.tabs.group({ tabIds: [tabId], groupId });
-          logger.debug('Moved tab to recreated special group', { tabId, type, groupId });
-          return { success: true, groupId };
-        } catch (retryErr) {
+          await chrome.tabs.group({ tabIds: [tabId], groupId: targetGroupId });
+          logger.debug('Moved tab to recreated special group', { tabId, type: groupType, groupId: targetGroupId });
+          return { success: true, groupId: targetGroupId };
+        } catch (retryError) {
           logger.error('Failed to move tab to special group', {
             tabId,
-            type,
-            groupId,
-            error: retryErr.message,
+            type: groupType,
+            groupId: targetGroupId,
+            error: retryError.message,
             errorCode: ERROR_CODES.ERR_TAB_GROUP,
           });
           return { success: false };
@@ -338,600 +421,588 @@ export async function moveTabToSpecialGroup(tabId, type, windowId, windowState, 
 
     logger.error('Failed to move tab to special group', {
       tabId,
-      type,
-      groupId,
-      error: err.message,
+      type: groupType,
+      groupId: targetGroupId,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_TAB_GROUP,
     });
     return { success: false };
   }
 }
 
-// ─── Group Status & Sorting (US4) ────────────────────────────────────────────
+// ─── Group Status & Sorting ───────────────────────────────────────────────────
 
-const STATUS_PRIORITY = { green: 0, yellow: 1, red: 2, gone: 3 };
+/** Priority ordering for lifecycle stages (lower = fresher/healthier). */
+const LIFECYCLE_STAGE_PRIORITY = { green: 0, yellow: 1, red: 2, gone: 3 };
 
-export function computeGroupStatus(groupId, tabMeta) {
-  let freshest = null;
-  for (const meta of Object.values(tabMeta)) {
-    if (meta.groupId !== groupId) continue;
-    if (meta.pinned) continue;
-    if (meta.isSpecialGroup) continue;
-    if (freshest === null || STATUS_PRIORITY[meta.status] < STATUS_PRIORITY[freshest]) {
-      freshest = meta.status;
+/**
+ * Determines the lifecycle stage of a tab group by finding its freshest (greenest) tab.
+ * A group's status is only as old as its youngest member.
+ */
+export function determineFreshestStatusInGroup(groupId, tabMeta) {
+  let freshestStage = null;
+  for (const tabEntry of Object.values(tabMeta)) {
+    if (tabEntry.groupId !== groupId) continue;
+    if (tabEntry.pinned) continue;
+    if (tabEntry.isSpecialGroup) continue;
+    if (freshestStage === null || LIFECYCLE_STAGE_PRIORITY[tabEntry.status] < LIFECYCLE_STAGE_PRIORITY[freshestStage]) {
+      freshestStage = tabEntry.status;
     }
   }
-  return freshest;
+  return freshestStage;
 }
 
-export async function updateGroupColor(groupId, status) {
+/**
+ * Updates a tab group's color to match its current lifecycle stage.
+ */
+export async function updateGroupColorToMatchStatus(groupId, lifecycleStage) {
   try {
-    markExtensionColorUpdate(groupId, status);
-    const result = await chrome.tabGroups.update(groupId, { color: status });
-    logger.debug('Updated group color', { groupId, status, resultColor: result?.color });
-  } catch (err) {
+    recordPendingExtensionColorChange(groupId, lifecycleStage);
+    const updateResult = await chrome.tabGroups.update(groupId, { color: lifecycleStage });
+    logger.debug('Updated group color', { groupId, status: lifecycleStage, resultColor: updateResult?.color });
+  } catch (error) {
     logger.warn('Failed to update group color', {
       groupId,
-      status,
-      error: err.message,
+      status: lifecycleStage,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_GROUP_MOVE,
     });
   }
 }
 
-export async function closeGoneGroups(windowId, goneGroupIds, tabMeta, windowState) {
+/**
+ * Closes all tabs belonging to groups that have reached the GONE stage.
+ * Returns the IDs of tabs that were successfully closed.
+ */
+export async function closeAllTabsInGoneGroups(windowId, goneGroupIds, tabMeta, windowState) {
   const closedTabIds = [];
-  const ws = windowState[windowId] || windowState[String(windowId)];
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
 
   for (const groupId of goneGroupIds) {
-    if (ws && isSpecialGroup(groupId, windowId, windowState)) {
+    if (windowEntry && isManagedAgingGroup(groupId, windowId, windowState)) {
       continue;
     }
 
-    const tabsInGroup = Object.values(tabMeta).filter(
-      (m) => m.groupId === groupId && m.windowId === Number(windowId) && !m.pinned
+    const tabsInThisGroup = Object.values(tabMeta).filter(
+      (entry) => entry.groupId === groupId && entry.windowId === Number(windowId) && !entry.pinned
     );
 
-    for (const tab of tabsInGroup) {
+    for (const tabEntry of tabsInThisGroup) {
       try {
-        await chrome.tabs.remove(tab.tabId);
-        closedTabIds.push(tab.tabId);
-      } catch (err) {
+        await chrome.tabs.remove(tabEntry.tabId);
+        closedTabIds.push(tabEntry.tabId);
+      } catch (error) {
         logger.warn('Failed to remove tab from gone group', {
-          tabId: tab.tabId,
+          tabId: tabEntry.tabId,
           groupId,
-          error: err.message,
+          error: error.message,
         });
       }
     }
 
-    if (ws && ws.groupZones) {
-      delete ws.groupZones[groupId];
-      delete ws.groupZones[String(groupId)];
+    if (windowEntry && windowEntry.groupZones) {
+      delete windowEntry.groupZones[groupId];
+      delete windowEntry.groupZones[String(groupId)];
     }
   }
 
   return closedTabIds;
 }
 
-const ZONE_RANK = { green: 0, yellow: 1, red: 2 };
+/** Sort order for lifecycle zones (green first, red last). */
+const ZONE_SORT_ORDER = { green: 0, yellow: 1, red: 2 };
 
 /**
- * Unified sort: reads live browser state, sorts an internal model, then
- * applies the minimal set of moves to make the browser match.
+ * Sorts all tabs and groups in a window according to their lifecycle zones.
  *
- * 1. Ungrouped tabs: if status ≠ zone → move to special group (yellow/red)
- *    or leave to the right of the green zone.  If status = zone → skip.
- *    Tabs with status 'gone' that are ungrouped or in special groups are
- *    bookmarked and closed.
- * 2. Groups: compute each group's status, build desired order, compare
- *    to actual order, move only when they differ.  Groups whose status
- *    is 'gone' are bookmarked as a group and closed.
+ * This is the unified sorting algorithm that:
+ *   1. Moves ungrouped tabs into managed groups (yellow/red) based on their status
+ *   2. Returns tabs to the green zone when they're refreshed
+ *   3. Bookmarks and closes gone tabs/groups
+ *   4. Reorders user groups by zone: green → yellow → red
+ *   5. Updates group colors to match their zone
  *
- * @param {number} windowId
- * @param {object} tabMeta
- * @param {object} windowState
- * @param {object} [goneConfig] - Optional config for handling gone tabs/groups
- * @param {boolean} goneConfig.bookmarkEnabled - Whether to bookmark before closing
- * @param {string|null} goneConfig.bookmarkFolderId - Folder ID for bookmarks
- * @param {function} goneConfig.bookmarkTab - async (tab, folderId) => boolean
- * @param {function} goneConfig.bookmarkGroupTabs - async (title, tabs, folderId) => result
- * @param {function} goneConfig.isBookmarkableUrl - (url) => boolean
+ * @param {number} windowId - The Chrome window to sort
+ * @param {object} tabMeta - All tab metadata entries
+ * @param {object} windowState - Per-window state
+ * @param {object} [goneConfig] - Configuration for handling gone tabs (bookmarking + closing)
+ * @param {object} settings - User settings (controls which sorting features are active)
  */
-export async function sortTabsAndGroups(windowId, tabMeta, windowState, goneConfig, settings) {
-  const ws = ensureWindowState(windowId, windowState);
-  const result = { tabsMoved: 0, groupsMoved: 0, goneTabsClosed: 0, goneGroupsClosed: 0 };
+export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, windowState, goneConfig, settings) {
+  const windowEntry = ensureWindowStateEntryExists(windowId, windowState);
+  const sortingResults = { tabsMoved: 0, groupsMoved: 0, goneTabsClosed: 0, goneGroupsClosed: 0 };
 
-  // Resolve toggle settings (default true for backward compatibility)
-  const tabSortingEnabled = settings?.tabSortingEnabled !== false;
-  const tabgroupSortingEnabled = settings?.tabgroupSortingEnabled !== false;
-  const tabgroupColoringEnabled = settings?.tabgroupColoringEnabled !== false;
+  const isTabSortingEnabled = settings?.tabSortingEnabled !== false;
+  const isGroupSortingEnabled = settings?.tabgroupSortingEnabled !== false;
+  const isGroupColoringEnabled = settings?.tabgroupColoringEnabled !== false;
 
   try {
-    // ── 1. Read current browser state ──────────────────────────────────
-    const [chromeTabs, chromeGroups] = await Promise.all([
+    // ── Step 1: Read current browser state ──────────────────────────
+    const [allBrowserTabs, allBrowserGroups] = await Promise.all([
       chrome.tabs.query({ windowId: Number(windowId) }),
       chrome.tabGroups.query({ windowId: Number(windowId) }),
     ]);
 
-    // Build lookup: tabId → chrome tab (for position info)
-    const chromeTabMap = new Map();
-    for (const ct of chromeTabs) chromeTabMap.set(ct.id, ct);
+    const browserTabById = new Map();
+    for (const browserTab of allBrowserTabs) browserTabById.set(browserTab.id, browserTab);
 
-    // Identify special group IDs
-    const specialGroupIds = new Set();
-    for (const g of chromeGroups) {
-      if (isSpecialGroup(g.id, windowId, windowState)) specialGroupIds.add(g.id);
+    const managedGroupIds = new Set();
+    for (const group of allBrowserGroups) {
+      if (isManagedAgingGroup(group.id, windowId, windowState)) managedGroupIds.add(group.id);
     }
 
     logger.debug('sortTabsAndGroups: browser state read', {
       windowId,
-      tabCount: chromeTabs.length,
-      groupCount: chromeGroups.length,
-      specialGroupIds: [...specialGroupIds],
+      tabCount: allBrowserTabs.length,
+      groupCount: allBrowserGroups.length,
+      specialGroupIds: [...managedGroupIds],
     });
 
-    // ── 2. Sort ungrouped tabs ─────────────────────────────────────────
-    // Collect unpinned, ungrouped tabs that we track
-    for (const ct of chromeTabs) {
-      if (ct.pinned) continue;
-      const meta = tabMeta[ct.id] || tabMeta[String(ct.id)];
-      if (!meta) continue;
+    // ── Step 2: Sort ungrouped tabs into managed groups ──────────────
+    for (const browserTab of allBrowserTabs) {
+      if (browserTab.pinned) continue;
+      const tabEntry = tabMeta[browserTab.id] || tabMeta[String(browserTab.id)];
+      if (!tabEntry) continue;
 
-      const actualGroupId = ct.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? ct.groupId : null;
-      const inSpecial = actualGroupId !== null && specialGroupIds.has(actualGroupId);
-      const inUserGroup = actualGroupId !== null && !inSpecial;
+      const actualGroupId = browserTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? browserTab.groupId : null;
+      const isInManagedGroup = actualGroupId !== null && managedGroupIds.has(actualGroupId);
+      const isInUserGroup = actualGroupId !== null && !isInManagedGroup;
 
-      // Skip tabs in user groups — they are sorted as part of group sorting
-      if (inUserGroup) continue;
+      if (isInUserGroup) continue;
 
-      // Determine what zone the tab is currently in
-      let currentZone = 'green'; // ungrouped = green zone
-      if (inSpecial) {
-        const sgType = getSpecialGroupType(actualGroupId, windowId, windowState);
-        if (sgType === SPECIAL_GROUP_TYPES.YELLOW) currentZone = 'yellow';
-        else if (sgType === SPECIAL_GROUP_TYPES.RED) currentZone = 'red';
+      let currentZone = 'green';
+      if (isInManagedGroup) {
+        const managedType = getManagedGroupType(actualGroupId, windowId, windowState);
+        if (managedType === MANAGED_GROUP_TYPES.YELLOW) currentZone = 'yellow';
+        else if (managedType === MANAGED_GROUP_TYPES.RED) currentZone = 'red';
       }
 
-      const desiredZone = meta.status; // green, yellow, red, or gone
+      const desiredZone = tabEntry.status;
 
-      // ── Gone ungrouped/special-group tabs: bookmark + close ──────────
-      // Gone handling always runs regardless of tabSortingEnabled
-      if (desiredZone === STATUS.GONE) {
+      // Handle gone tabs (always runs regardless of tab sorting toggle)
+      if (desiredZone === TAB_LIFECYCLE_STAGE.GONE) {
         if (goneConfig) {
           if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
             try {
-              const liveTab = chromeTabMap.get(ct.id);
+              const liveTab = browserTabById.get(browserTab.id);
               if (liveTab && goneConfig.isBookmarkableUrl(liveTab.url)) {
                 await goneConfig.bookmarkTab(liveTab, goneConfig.bookmarkFolderId);
-                logger.debug('Bookmarked gone ungrouped tab', { tabId: ct.id, url: liveTab.url });
+                logger.debug('Bookmarked gone ungrouped tab', { tabId: browserTab.id, url: liveTab.url });
               }
-            } catch (err) {
-              logger.warn('Failed to bookmark gone tab', { tabId: ct.id, error: err.message });
+            } catch (error) {
+              logger.warn('Failed to bookmark gone tab', { tabId: browserTab.id, error: error.message });
             }
           }
           try {
-            await chrome.tabs.remove(ct.id);
-            delete tabMeta[ct.id];
-            delete tabMeta[String(ct.id)];
-            result.goneTabsClosed++;
-          } catch (err) {
-            logger.warn('Failed to close gone tab', { tabId: ct.id, error: err.message });
+            await chrome.tabs.remove(browserTab.id);
+            delete tabMeta[browserTab.id];
+            delete tabMeta[String(browserTab.id)];
+            sortingResults.goneTabsClosed++;
+          } catch (error) {
+            logger.warn('Failed to close gone tab', { tabId: browserTab.id, error: error.message });
           }
         }
         continue;
       }
 
-      // When tab sorting is disabled, skip moving tabs to/from special groups
-      if (!tabSortingEnabled) continue;
-
-      // If status matches zone → don't sort it
+      if (!isTabSortingEnabled) continue;
       if (currentZone === desiredZone) continue;
 
-      // Status differs from zone → move according to rules
       if (desiredZone === 'yellow') {
-        // Move to yellow special group
-        const moveResult = await moveTabToSpecialGroup(ct.id, 'yellow', windowId, windowState, settings);
+        const moveResult = await moveTabToManagedGroup(browserTab.id, 'yellow', windowId, windowState, settings);
         if (moveResult.success) {
-          meta.groupId = moveResult.groupId;
-          meta.isSpecialGroup = true;
-          result.tabsMoved++;
-          // Refresh specialGroupIds in case a new group was created
-          if (!specialGroupIds.has(moveResult.groupId)) specialGroupIds.add(moveResult.groupId);
+          tabEntry.groupId = moveResult.groupId;
+          tabEntry.isSpecialGroup = true;
+          sortingResults.tabsMoved++;
+          if (!managedGroupIds.has(moveResult.groupId)) managedGroupIds.add(moveResult.groupId);
         }
       } else if (desiredZone === 'red') {
-        // Move to red special group (from yellow special or ungrouped)
-        const moveResult = await moveTabToSpecialGroup(ct.id, 'red', windowId, windowState, settings);
+        const moveResult = await moveTabToManagedGroup(browserTab.id, 'red', windowId, windowState, settings);
         if (moveResult.success) {
-          meta.groupId = moveResult.groupId;
-          meta.isSpecialGroup = true;
-          result.tabsMoved++;
-          if (!specialGroupIds.has(moveResult.groupId)) specialGroupIds.add(moveResult.groupId);
+          tabEntry.groupId = moveResult.groupId;
+          tabEntry.isSpecialGroup = true;
+          sortingResults.tabsMoved++;
+          if (!managedGroupIds.has(moveResult.groupId)) managedGroupIds.add(moveResult.groupId);
         }
-      } else if (desiredZone === 'green' && inSpecial) {
-        // Tab became green but is still in a special group → ungroup
-        const ungrouped = await ungroupTab(ct.id);
-        if (ungrouped) {
-          meta.groupId = null;
-          meta.isSpecialGroup = false;
-          result.tabsMoved++;
+      } else if (desiredZone === 'green' && isInManagedGroup) {
+        const wasUngrouped = await removeTabFromItsGroup(browserTab.id);
+        if (wasUngrouped) {
+          tabEntry.groupId = null;
+          tabEntry.isSpecialGroup = false;
+          sortingResults.tabsMoved++;
         }
       }
     }
 
-    // Clean up empty special groups only if we moved tabs out of them
-    if (result.tabsMoved > 0) {
-      await removeSpecialGroupIfEmpty(windowId, 'yellow', windowState);
-      await removeSpecialGroupIfEmpty(windowId, 'red', windowState);
+    if (sortingResults.tabsMoved > 0) {
+      await removeManagedGroupIfEmpty(windowId, 'yellow', windowState);
+      await removeManagedGroupIfEmpty(windowId, 'red', windowState);
     }
 
-    // ── 3. Sort groups (gated on tabgroupSortingEnabled) ────────────────
-    // When tabgroup sorting is disabled, we still compute group statuses
-    // (needed for color updates and gone handling) but skip reordering.
-    // Re-read tabs/groups after tab moves may have created/emptied groups.
-    // tabGroups.query is creation-ordered, so we need tab indices to recover
-    // visual group order.
-    const [tabsAfter, groupsAfter] = await Promise.all([
+    // ── Step 3: Sort groups by lifecycle zone ─────────────────────────
+    const [tabsAfterMoves, groupsAfterMoves] = await Promise.all([
       chrome.tabs.query({ windowId: Number(windowId) }),
       chrome.tabGroups.query({ windowId: Number(windowId) }),
     ]);
 
-    const groupMinIndex = new Map();
-    for (let i = 0; i < tabsAfter.length; i++) {
-      const ct = tabsAfter[i];
-      if (ct.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
-      const tabIndex = Number.isFinite(ct.index) ? ct.index : i;
-      const prev = groupMinIndex.get(ct.groupId);
-      if (prev === undefined || tabIndex < prev) {
-        groupMinIndex.set(ct.groupId, tabIndex);
+    const firstTabIndexByGroup = new Map();
+    for (let i = 0; i < tabsAfterMoves.length; i++) {
+      const browserTab = tabsAfterMoves[i];
+      if (browserTab.groupId === chrome.tabGroups.TAB_GROUP_ID_NONE) continue;
+      const tabIndex = Number.isFinite(browserTab.index) ? browserTab.index : i;
+      const previousFirst = firstTabIndexByGroup.get(browserTab.groupId);
+      if (previousFirst === undefined || tabIndex < previousFirst) {
+        firstTabIndexByGroup.set(browserTab.groupId, tabIndex);
       }
     }
 
-    // Refresh special group set from windowState references only.
-    // We intentionally do NOT re-discover by title/color — a user group
-    // that happens to match (e.g. "Yellow"/yellow) must never be hijacked.
-    const specialAfter = new Set();
-    for (const g of groupsAfter) {
-      if (isSpecialGroup(g.id, windowId, windowState)) {
-        specialAfter.add(g.id);
+    const managedGroupIdsAfterMoves = new Set();
+    for (const group of groupsAfterMoves) {
+      if (isManagedAgingGroup(group.id, windowId, windowState)) {
+        managedGroupIdsAfterMoves.add(group.id);
       }
     }
 
-    const userGroups = groupsAfter
-      .filter((g) => !specialAfter.has(g.id))
-      .sort((a, b) => {
-        const ai = groupMinIndex.get(a.id);
-        const bi = groupMinIndex.get(b.id);
-        if (ai === undefined && bi === undefined) return a.id - b.id;
-        if (ai === undefined) return 1;
-        if (bi === undefined) return -1;
-        return ai - bi;
+    const userGroupsSortedByPosition = groupsAfterMoves
+      .filter((group) => !managedGroupIdsAfterMoves.has(group.id))
+      .sort((groupA, groupB) => {
+        const indexA = firstTabIndexByGroup.get(groupA.id);
+        const indexB = firstTabIndexByGroup.get(groupB.id);
+        if (indexA === undefined && indexB === undefined) return groupA.id - groupB.id;
+        if (indexA === undefined) return 1;
+        if (indexB === undefined) return -1;
+        return indexA - indexB;
       });
 
-    // Snapshot previous zones BEFORE overwriting
-    const prevZones = { ...ws.groupZones };
+    const previousZoneAssignments = { ...windowEntry.groupZones };
 
-    // Compute status for every user group
-    const statusMap = new Map();
-    for (const group of userGroups) {
-      const status = computeGroupStatus(group.id, tabMeta);
-      if (!status) continue;
-      statusMap.set(group.id, status);
-      ws.groupZones[group.id] = status;
+    const groupStatusMap = new Map();
+    for (const group of userGroupsSortedByPosition) {
+      const groupLifecycleStage = determineFreshestStatusInGroup(group.id, tabMeta);
+      if (!groupLifecycleStage) continue;
+      groupStatusMap.set(group.id, groupLifecycleStage);
+      windowEntry.groupZones[group.id] = groupLifecycleStage;
     }
 
-    // ── Handle gone groups: bookmark + close ──────────────────────
+    // Handle gone groups: bookmark and close
     const goneGroupIds = [];
-    for (const [gid, status] of statusMap) {
-      if (status === STATUS.GONE) goneGroupIds.push(gid);
+    for (const [groupId, lifecycleStage] of groupStatusMap) {
+      if (lifecycleStage === TAB_LIFECYCLE_STAGE.GONE) goneGroupIds.push(groupId);
     }
 
     if (goneConfig && goneGroupIds.length > 0) {
-      for (const gid of goneGroupIds) {
-        // Bookmark the group as a whole
+      for (const goneGroupId of goneGroupIds) {
         if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
           try {
-            const groupInfo = await chrome.tabGroups.get(gid);
-            const groupTabs = await chrome.tabs.query({ groupId: gid });
+            const groupInfo = await chrome.tabGroups.get(goneGroupId);
+            const groupTabs = await chrome.tabs.query({ groupId: goneGroupId });
             await goneConfig.bookmarkGroupTabs(
               groupInfo.title || '', groupTabs, goneConfig.bookmarkFolderId
             );
             logger.info('Bookmarked gone group', {
-              groupId: gid, title: groupInfo.title || '(unnamed)', tabCount: groupTabs.length,
+              groupId: goneGroupId, title: groupInfo.title || '(unnamed)', tabCount: groupTabs.length,
             });
-          } catch (err) {
-            logger.warn('Failed to bookmark gone group', { groupId: gid, error: err.message });
+          } catch (error) {
+            logger.warn('Failed to bookmark gone group', { groupId: goneGroupId, error: error.message });
           }
         }
 
-        // Close all tabs in the group
-        const tabsInGroup = Object.values(tabMeta).filter(
-          (m) => m.groupId === gid && m.windowId === Number(windowId) && !m.pinned
+        const tabsInGoneGroup = Object.values(tabMeta).filter(
+          (entry) => entry.groupId === goneGroupId && entry.windowId === Number(windowId) && !entry.pinned
         );
-        for (const m of tabsInGroup) {
+        for (const tabEntry of tabsInGoneGroup) {
           try {
-            await chrome.tabs.remove(m.tabId);
-            delete tabMeta[m.tabId];
-            delete tabMeta[String(m.tabId)];
-          } catch (err) {
-            logger.warn('Failed to remove tab from gone group', { tabId: m.tabId, groupId: gid, error: err.message });
+            await chrome.tabs.remove(tabEntry.tabId);
+            delete tabMeta[tabEntry.tabId];
+            delete tabMeta[String(tabEntry.tabId)];
+          } catch (error) {
+            logger.warn('Failed to remove tab from gone group', { tabId: tabEntry.tabId, groupId: goneGroupId, error: error.message });
           }
         }
 
-        // Clean up groupZones
-        delete ws.groupZones[gid];
-        delete ws.groupZones[String(gid)];
-        result.goneGroupsClosed++;
-        statusMap.delete(gid);
+        delete windowEntry.groupZones[goneGroupId];
+        delete windowEntry.groupZones[String(goneGroupId)];
+        sortingResults.goneGroupsClosed++;
+        groupStatusMap.delete(goneGroupId);
       }
     }
 
-    const ordered = userGroups.filter((g) => statusMap.has(g.id));
+    const survivingUserGroups = userGroupsSortedByPosition.filter((group) => groupStatusMap.has(group.id));
 
-    // Detect which groups just transitioned into a new zone.
-    // Brand-new groups (no previous zone entry) that are green are also
-    // treated as "just arrived" so they sort to the LEFT of the green
-    // zone instead of being appended to the right.
-    const justArrived = new Set();
-    for (const g of ordered) {
-      const cur = statusMap.get(g.id);
-      const prev = prevZones[g.id] || prevZones[String(g.id)];
-      if (prev === undefined) {
-        // New group with no prior zone — treat green as "just arrived"
-        // so it lands at the leftmost position in the green zone.
-        if (cur === 'green') justArrived.add(g.id);
-      } else if (prev !== cur) {
-        justArrived.add(g.id);
+    // Detect groups that just transitioned into a new zone
+    const groupsThatJustChangedZone = new Set();
+    for (const group of survivingUserGroups) {
+      const currentStage = groupStatusMap.get(group.id);
+      const previousZone = previousZoneAssignments[group.id] || previousZoneAssignments[String(group.id)];
+      if (previousZone === undefined) {
+        if (currentStage === 'green') groupsThatJustChangedZone.add(group.id);
+      } else if (previousZone !== currentStage) {
+        groupsThatJustChangedZone.add(group.id);
       }
     }
 
-    // Build sorted list per zone.  Within each zone:
-    //   - newly arrived groups go to the LEFT (inserted first)
-    //   - groups already in the zone keep their Chrome visual order
-    // For green: newly refreshed → leftmost of ALL groups
-    // For yellow/red: newly arrived → left of zone (right of special group)
-    const greenGroups = ordered.filter((g) => statusMap.get(g.id) === 'green');
-    const yellowGroups = ordered.filter((g) => statusMap.get(g.id) === 'yellow');
-    const redGroups = ordered.filter((g) => statusMap.get(g.id) === 'red');
+    // Build sorted list per zone: newly arrived groups go to the LEFT of their zone
+    const greenZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'green');
+    const yellowZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'yellow');
+    const redZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'red');
 
-    const sortWithNewFirst = (groups) => {
-      const arrived = groups.filter((g) => justArrived.has(g.id));
-      const staying = groups.filter((g) => !justArrived.has(g.id));
-      return [...arrived, ...staying];
+    const sortNewlyArrivedFirst = (groups) => {
+      const justArrived = groups.filter((group) => groupsThatJustChangedZone.has(group.id));
+      const alreadyInZone = groups.filter((group) => !groupsThatJustChangedZone.has(group.id));
+      return [...justArrived, ...alreadyInZone];
     };
 
-    const sortedUser = [
-      ...sortWithNewFirst(greenGroups),
-      ...sortWithNewFirst(yellowGroups),
-      ...sortWithNewFirst(redGroups),
+    const desiredUserGroupOrder = [
+      ...sortNewlyArrivedFirst(greenZoneGroups),
+      ...sortNewlyArrivedFirst(yellowZoneGroups),
+      ...sortNewlyArrivedFirst(redZoneGroups),
     ];
 
-    // Insert special groups at zone boundaries:
-    // Yellow special at the start of the yellow zone,
-    // Red special at the start of the red zone.
-    const desired = [];
-    const yellowSpecialId = ws.specialGroups.yellow;
-    const redSpecialId = ws.specialGroups.red;
-    let yellowInserted = false;
-    let redInserted = false;
+    // Insert managed groups at zone boundaries
+    const desiredFullOrder = [];
+    const yellowManagedGroupId = windowEntry.specialGroups.yellow;
+    const redManagedGroupId = windowEntry.specialGroups.red;
+    let yellowManagedInserted = false;
+    let redManagedInserted = false;
 
-    for (const g of sortedUser) {
-      const zone = statusMap.get(g.id);
-      if (!yellowInserted && yellowSpecialId !== null && specialAfter.has(yellowSpecialId)
-          && ZONE_RANK[zone] >= ZONE_RANK.yellow) {
-        desired.push({ id: yellowSpecialId, _special: true });
-        yellowInserted = true;
+    for (const group of desiredUserGroupOrder) {
+      const zone = groupStatusMap.get(group.id);
+      if (!yellowManagedInserted && yellowManagedGroupId !== null && managedGroupIdsAfterMoves.has(yellowManagedGroupId)
+          && ZONE_SORT_ORDER[zone] >= ZONE_SORT_ORDER.yellow) {
+        desiredFullOrder.push({ id: yellowManagedGroupId, _special: true });
+        yellowManagedInserted = true;
       }
-      if (!redInserted && redSpecialId !== null && specialAfter.has(redSpecialId)
-          && ZONE_RANK[zone] >= ZONE_RANK.red) {
-        desired.push({ id: redSpecialId, _special: true });
-        redInserted = true;
+      if (!redManagedInserted && redManagedGroupId !== null && managedGroupIdsAfterMoves.has(redManagedGroupId)
+          && ZONE_SORT_ORDER[zone] >= ZONE_SORT_ORDER.red) {
+        desiredFullOrder.push({ id: redManagedGroupId, _special: true });
+        redManagedInserted = true;
       }
-      desired.push(g);
+      desiredFullOrder.push(group);
     }
-    if (!yellowInserted && yellowSpecialId !== null && specialAfter.has(yellowSpecialId)) {
-      desired.push({ id: yellowSpecialId, _special: true });
+    if (!yellowManagedInserted && yellowManagedGroupId !== null && managedGroupIdsAfterMoves.has(yellowManagedGroupId)) {
+      desiredFullOrder.push({ id: yellowManagedGroupId, _special: true });
     }
-    if (!redInserted && redSpecialId !== null && specialAfter.has(redSpecialId)) {
-      desired.push({ id: redSpecialId, _special: true });
+    if (!redManagedInserted && redManagedGroupId !== null && managedGroupIdsAfterMoves.has(redManagedGroupId)) {
+      desiredFullOrder.push({ id: redManagedGroupId, _special: true });
     }
 
-    // Compare current visual order to desired order.
-    // tabGroups.query returns creation order, so we sort by min tab index.
-    const allOrdered = groupsAfter
-      .filter((g) => statusMap.has(g.id) || specialAfter.has(g.id))
-      .sort((a, b) => {
-        const ai = groupMinIndex.get(a.id);
-        const bi = groupMinIndex.get(b.id);
-        if (ai === undefined && bi === undefined) return a.id - b.id;
-        if (ai === undefined) return 1;
-        if (bi === undefined) return -1;
-        return ai - bi;
+    // Compare current visual order to desired order
+    const currentVisualOrder = groupsAfterMoves
+      .filter((group) => groupStatusMap.has(group.id) || managedGroupIdsAfterMoves.has(group.id))
+      .sort((groupA, groupB) => {
+        const indexA = firstTabIndexByGroup.get(groupA.id);
+        const indexB = firstTabIndexByGroup.get(groupB.id);
+        if (indexA === undefined && indexB === undefined) return groupA.id - groupB.id;
+        if (indexA === undefined) return 1;
+        if (indexB === undefined) return -1;
+        return indexA - indexB;
       });
-    const currentIds = allOrdered.map((g) => g.id);
-    const desiredIds = desired.map((g) => g.id);
+    const currentGroupIds = currentVisualOrder.map((group) => group.id);
+    const desiredGroupIds = desiredFullOrder.map((group) => group.id);
 
     logger.info('sortTabsAndGroups: group order comparison', {
       windowId,
-      currentIds,
-      desiredIds,
-      specialGroups: { yellow: ws.specialGroups.yellow, red: ws.specialGroups.red },
-      specialAfter: [...specialAfter],
-      userGroupStatuses: Object.fromEntries(statusMap),
-      groupsAfterIds: groupsAfter.map((g) => g.id),
-      needsMove: currentIds.join(',') !== desiredIds.join(','),
+      currentIds: currentGroupIds,
+      desiredIds: desiredGroupIds,
+      specialGroups: { yellow: windowEntry.specialGroups.yellow, red: windowEntry.specialGroups.red },
+      specialAfter: [...managedGroupIdsAfterMoves],
+      userGroupStatuses: Object.fromEntries(groupStatusMap),
+      groupsAfterIds: groupsAfterMoves.map((group) => group.id),
+      needsMove: currentGroupIds.join(',') !== desiredGroupIds.join(','),
     });
 
-    // Only reorder groups when tabgroup sorting is enabled
-    if (tabgroupSortingEnabled && currentIds.join(',') !== desiredIds.join(',')) {
-      for (const g of desired) {
+    if (isGroupSortingEnabled && currentGroupIds.join(',') !== desiredGroupIds.join(',')) {
+      for (const group of desiredFullOrder) {
         try {
-          await chrome.tabGroups.move(g.id, { index: -1 });
-          result.groupsMoved++;
-        } catch (err) {
+          await chrome.tabGroups.move(group.id, { index: -1 });
+          sortingResults.groupsMoved++;
+        } catch (error) {
           logger.warn('Failed to move group to zone', {
-            groupId: g.id, zone: g._special ? 'special' : statusMap.get(g.id),
-            error: err.message, errorCode: ERROR_CODES.ERR_GROUP_MOVE,
+            groupId: group.id, zone: group._special ? 'special' : groupStatusMap.get(group.id),
+            error: error.message, errorCode: ERROR_CODES.ERR_GROUP_MOVE,
           });
         }
       }
     }
 
-    // Update colors for user groups only when tabgroup coloring is enabled
-    if (tabgroupColoringEnabled) {
-      for (const g of ordered) {
-        const status = statusMap.get(g.id);
-        if (status) {
-          await updateGroupColor(g.id, status);
+    if (isGroupColoringEnabled) {
+      for (const group of survivingUserGroups) {
+        const lifecycleStage = groupStatusMap.get(group.id);
+        if (lifecycleStage) {
+          await updateGroupColorToMatchStatus(group.id, lifecycleStage);
         }
       }
     }
 
     logger.debug('sortTabsAndGroups: complete', {
       windowId,
-      tabsMoved: result.tabsMoved,
-      groupsMoved: result.groupsMoved,
-      goneTabsClosed: result.goneTabsClosed,
-      goneGroupsClosed: result.goneGroupsClosed,
-      desiredGroupOrder: desiredIds,
+      tabsMoved: sortingResults.tabsMoved,
+      groupsMoved: sortingResults.groupsMoved,
+      goneTabsClosed: sortingResults.goneTabsClosed,
+      goneGroupsClosed: sortingResults.goneGroupsClosed,
+      desiredGroupOrder: desiredGroupIds,
     });
-  } catch (err) {
+  } catch (error) {
     logger.error('Failed to sort tabs and groups', {
       windowId,
-      error: err.message,
+      error: error.message,
       errorCode: ERROR_CODES.ERR_GROUP_MOVE,
     });
   }
 
-  return result;
+  return sortingResults;
 }
 
 /**
- * Dissolve unnamed groups that contain only a single tab.
- * The remaining tab is ungrouped and its meta is updated.
+ * Dissolves unnamed groups that contain only a single tab.
+ * The remaining tab is ungrouped and its metadata is updated.
+ * Only dissolves groups that were created by the extension, not by the user.
  */
-export async function dissolveUnnamedSingleTabGroups(windowId, tabMeta, windowState) {
-  let dissolved = 0;
+export async function dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, windowState) {
+  let groupsDissolved = 0;
   try {
-    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    const allGroups = await chrome.tabGroups.query({ windowId: Number(windowId) });
 
-    for (const group of groups) {
-      // Skip special groups
-      if (isSpecialGroup(group.id, windowId, windowState)) continue;
-      // Only dissolve groups created by our extension
-      if (!extensionCreatedGroups.has(group.id)) continue;
-      // Only dissolve groups with no user-given title.
-      // Strip the age suffix so that groups whose only "title" is an
-      // age label like "(1m)" are still considered unnamed.
-      if (stripAgeSuffix(group.title)) continue;
+    for (const group of allGroups) {
+      if (isManagedAgingGroup(group.id, windowId, windowState)) continue;
+      if (!groupsCreatedByExtension.has(group.id)) continue;
+      if (removeAgeSuffixFromTitle(group.title)) continue;
 
-      const tabs = await chrome.tabs.query({ groupId: group.id });
-      if (tabs.length !== 1) continue;
+      const tabsInGroup = await chrome.tabs.query({ groupId: group.id });
+      if (tabsInGroup.length !== 1) continue;
 
-      const tab = tabs[0];
+      const loneTab = tabsInGroup[0];
       try {
-        await chrome.tabs.ungroup(tab.id);
-        // Update tab meta
-        const meta = tabMeta[tab.id] || tabMeta[String(tab.id)];
-        if (meta) {
-          meta.groupId = null;
-          meta.isSpecialGroup = false;
+        await chrome.tabs.ungroup(loneTab.id);
+        const tabEntry = tabMeta[loneTab.id] || tabMeta[String(loneTab.id)];
+        if (tabEntry) {
+          tabEntry.groupId = null;
+          tabEntry.isSpecialGroup = false;
         }
-        extensionCreatedGroups.delete(group.id);
-        dissolved++;
+        groupsCreatedByExtension.delete(group.id);
+        groupsDissolved++;
         logger.debug('Dissolved unnamed single-tab group', {
           groupId: group.id,
-          tabId: tab.id,
+          tabId: loneTab.id,
           windowId,
         });
-      } catch (err) {
-        if (err.message && err.message.includes('cannot be edited')) {
-          // Drag in progress — schedule continuous retry until drag completes
-          scheduleDissolution(group.id, tab.id, windowId);
+      } catch (error) {
+        if (error.message && error.message.includes('cannot be edited')) {
+          scheduleGroupDissolutionRetry(group.id, loneTab.id, windowId);
           logger.debug('Drag lock detected, scheduled dissolution retry', {
-            groupId: group.id, tabId: tab.id,
+            groupId: group.id, tabId: loneTab.id,
           });
         } else {
           logger.warn('Failed to dissolve unnamed single-tab group', {
-            groupId: group.id, tabId: tab.id, error: err.message,
+            groupId: group.id, tabId: loneTab.id, error: error.message,
           });
         }
       }
     }
-  } catch (err) {
+  } catch (error) {
     logger.error('Failed to query groups for dissolution', {
       windowId,
-      error: err.message,
+      error: error.message,
     });
   }
-  return { dissolved };
+  return { dissolved: groupsDissolved };
 }
 
-// ─── Group Age Display ────────────────────────────────────────────────────────
+// ─── Group Title Parsing & Age Display ────────────────────────────────────────
 
-const AGE_SUFFIX_RE = /\s?(\([0-9]+[mhd]\))$/;
+/** Pattern matching age suffixes like "(1m)", "(2h)", "(3d)". */
+const AGE_SUFFIX_PATTERN = /\s?(\([0-9]+[mhd]\))$/;
 
-export function parseGroupTitle(title) {
+/**
+ * Separates a group title into its base name and age suffix.
+ * "My Tabs (2h)" → { baseName: "My Tabs", ageSuffix: "(2h)" }
+ */
+export function separateGroupTitleFromAgeSuffix(title) {
   if (!title) {
     return { baseName: '', ageSuffix: '' };
   }
 
-  const trimmed = String(title).trim();
-  const match = trimmed.match(AGE_SUFFIX_RE);
-  if (!match) {
-    return { baseName: trimmed, ageSuffix: '' };
+  const trimmedTitle = String(title).trim();
+  const suffixMatch = trimmedTitle.match(AGE_SUFFIX_PATTERN);
+  if (!suffixMatch) {
+    return { baseName: trimmedTitle, ageSuffix: '' };
   }
 
-  const ageSuffix = match[1] || '';
-  const baseName = trimmed.slice(0, match.index).trim();
+  const ageSuffix = suffixMatch[1] || '';
+  const baseName = trimmedTitle.slice(0, suffixMatch.index).trim();
   return { baseName, ageSuffix };
 }
 
-export function composeGroupTitle(baseName, ageSuffix) {
-  const base = (baseName || '').trim();
-  const suffix = (ageSuffix || '').trim();
-  if (base && suffix) return `${base} ${suffix}`;
-  return base || suffix;
+/**
+ * Combines a base group name with an age suffix into a complete title.
+ * ("My Tabs", "(2h)") → "My Tabs (2h)"
+ */
+export function combineGroupTitleWithAgeSuffix(baseName, ageSuffix) {
+  const trimmedBase = (baseName || '').trim();
+  const trimmedSuffix = (ageSuffix || '').trim();
+  if (trimmedBase && trimmedSuffix) return `${trimmedBase} ${trimmedSuffix}`;
+  return trimmedBase || trimmedSuffix;
 }
 
-export function isBaseGroupNameEmpty(title) {
-  return parseGroupTitle(title).baseName.length === 0;
+/**
+ * Returns true if the group has no user-given name (only an age suffix or empty).
+ */
+export function hasNoUserGivenName(title) {
+  return separateGroupTitleFromAgeSuffix(title).baseName.length === 0;
 }
 
-export function stripAgeSuffix(title) {
+/**
+ * Removes the age suffix from a group title, returning just the base name.
+ * "My Tabs (2h)" → "My Tabs"
+ */
+export function removeAgeSuffixFromTitle(title) {
   if (!title) return title;
-  return parseGroupTitle(title).baseName;
+  return separateGroupTitleFromAgeSuffix(title).baseName;
 }
 
-export function applyUserEditLock(windowId, group, windowState, lockMs = 15_000, nowMs = Date.now()) {
-  const ws = ensureWindowState(windowId, windowState);
+/**
+ * Locks auto-naming for a group after the user manually edits its title.
+ * Prevents the extension from immediately overwriting a user's rename.
+ *
+ * @param {number} windowId - The Chrome window ID
+ * @param {object} group - The Chrome tabGroups object
+ * @param {object} windowState - Per-window state
+ * @param {number} lockDurationMs - How long to lock auto-naming (default 15 seconds)
+ * @param {number} currentTime - Current timestamp (for testing)
+ */
+export function lockAutoNamingAfterUserEdit(windowId, group, windowState, lockDurationMs = 15_000, currentTime = Date.now()) {
+  const windowEntry = ensureWindowStateEntryExists(windowId, windowState);
   const groupId = group?.id;
   if (groupId === null || groupId === undefined) {
     return { locked: false };
   }
 
-  const { baseName } = parseGroupTitle(group?.title || '');
+  const { baseName } = separateGroupTitleFromAgeSuffix(group?.title || '');
   if (baseName.length > 0) {
-    removeGroupNamingEntry(ws, groupId);
+    removeGroupNamingMetadata(windowEntry, groupId);
     return { locked: false, removed: true };
   }
 
-  const now = asPositiveTimestamp(nowMs, Date.now());
-  const lockDuration = Number.isFinite(lockMs) && lockMs > 0 ? lockMs : 15_000;
-  const existing = getGroupNamingEntry(ws, groupId);
-  const entry = normalizeGroupNamingEntry(existing, now);
-  const userEditLockUntil = Math.max(entry.userEditLockUntil, now + lockDuration);
+  const now = asPositiveTimestampOrFallback(currentTime, Date.now());
+  const effectiveLockDuration = Number.isFinite(lockDurationMs) && lockDurationMs > 0 ? lockDurationMs : 15_000;
+  const existingMetadata = getGroupNamingMetadata(windowEntry, groupId);
+  const normalizedMetadata = normalizeGroupNamingMetadata(existingMetadata, now);
+  const lockExpiresAt = Math.max(normalizedMetadata.userEditLockUntil, now + effectiveLockDuration);
 
-  setGroupNamingEntry(ws, groupId, {
-    ...entry,
-    userEditLockUntil,
+  setGroupNamingMetadata(windowEntry, groupId, {
+    ...normalizedMetadata,
+    userEditLockUntil: lockExpiresAt,
   });
 
-  return { locked: true, userEditLockUntil };
+  return { locked: true, userEditLockUntil: lockExpiresAt };
 }
 
-export function formatAge(ms) {
-  const totalMinutes = Math.floor(ms / 60000);
+/**
+ * Formats a duration in milliseconds as a short human-readable string.
+ * 90000 → "1m", 7200000 → "2h", 172800000 → "2d"
+ */
+export function formatAgeAsShortString(durationMs) {
+  const totalMinutes = Math.floor(durationMs / 60000);
   if (totalMinutes < 60) return `${Math.max(1, totalMinutes)}m`;
   const totalHours = Math.floor(totalMinutes / 60);
   if (totalHours < 24) return `${totalHours}h`;
@@ -939,59 +1010,67 @@ export function formatAge(ms) {
   return `${totalDays}d`;
 }
 
-export function computeGroupAge(groupId, tabMeta, activeTimeMs, settings) {
-  let freshestAge = null;
-  for (const meta of Object.values(tabMeta)) {
-    if (meta.groupId !== groupId) continue;
-    if (meta.pinned) continue;
-    if (meta.isSpecialGroup) continue;
-    const age = computeAge(meta, activeTimeMs, settings);
-    if (freshestAge === null || age < freshestAge) freshestAge = age;
+/**
+ * Calculates the age of a tab group (based on its freshest/youngest tab).
+ */
+export function calculateAgeOfFreshestTabInGroup(groupId, tabMeta, activeTimeMs, settings) {
+  let freshestTabAge = null;
+  for (const tabEntry of Object.values(tabMeta)) {
+    if (tabEntry.groupId !== groupId) continue;
+    if (tabEntry.pinned) continue;
+    if (tabEntry.isSpecialGroup) continue;
+    const tabAge = calculateTabAgeInMs(tabEntry, activeTimeMs, settings);
+    if (freshestTabAge === null || tabAge < freshestTabAge) freshestTabAge = tabAge;
   }
-  return freshestAge === null ? 0 : freshestAge;
+  return freshestTabAge === null ? 0 : freshestTabAge;
 }
 
-export async function autoNameEligibleGroups(windowId, tabMeta, windowState, config = {}) {
-  const ws = ensureWindowState(windowId, windowState);
-  const now = asPositiveTimestamp(config.nowMs, Date.now());
-  const enabled = config.enabled !== undefined ? Boolean(config.enabled) : true;
-  const delayMinutes = Number.isInteger(config.delayMinutes) && config.delayMinutes > 0
+/**
+ * Automatically names unnamed tab groups that have been unnamed for longer
+ * than the configured delay. Respects user-edit locks and checks group
+ * state at every step to avoid overwriting user changes.
+ */
+export async function autoNameUnnamedGroupsWhenReady(windowId, tabMeta, windowState, config = {}) {
+  const windowEntry = ensureWindowStateEntryExists(windowId, windowState);
+  const now = asPositiveTimestampOrFallback(config.nowMs, Date.now());
+  const isNamingEnabled = config.enabled !== undefined ? Boolean(config.enabled) : true;
+  const namingDelayMinutes = Number.isInteger(config.delayMinutes) && config.delayMinutes > 0
     ? config.delayMinutes
-    : AUTO_NAME_DEFAULT_DELAY_MINUTES;
-  const delayMs = delayMinutes * 60_000;
+    : DEFAULT_AUTO_NAMING_DELAY_MINUTES;
+  const namingDelayMs = namingDelayMinutes * 60_000;
 
-  const summary = {
+  const namingSummary = {
     named: 0,
     skipped: 0,
     attempted: 0,
   };
 
-  let groups;
+  let allGroups;
   try {
-    groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
-  } catch (err) {
+    allGroups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+  } catch (error) {
     logger.warn('Auto group naming skipped: failed to query groups', {
       windowId,
-      error: err.message,
+      error: error.message,
     });
-    return summary;
+    return namingSummary;
   }
 
-  for (const group of groups) {
-    if (isSpecialGroup(group.id, windowId, windowState)) continue;
+  for (const group of allGroups) {
+    if (isManagedAgingGroup(group.id, windowId, windowState)) continue;
 
-    const { baseName } = parseGroupTitle(group.title || '');
+    const { baseName } = separateGroupTitleFromAgeSuffix(group.title || '');
     if (baseName.length > 0) {
-      removeGroupNamingEntry(ws, group.id);
+      removeGroupNamingMetadata(windowEntry, group.id);
       continue;
     }
 
-    const existing = getGroupNamingEntry(ws, group.id);
-    const entry = normalizeGroupNamingEntry(existing, now);
-    setGroupNamingEntry(ws, group.id, entry);
+    const existingMetadata = getGroupNamingMetadata(windowEntry, group.id);
+    const normalizedMetadata = normalizeGroupNamingMetadata(existingMetadata, now);
+    setGroupNamingMetadata(windowEntry, group.id, normalizedMetadata);
 
-    if (!enabled) {
-      summary.skipped++;
+    if (!isNamingEnabled) {
+      namingSummary.skipped++;
       logger.debug('Auto group naming skipped', {
         windowId,
         groupId: group.id,
@@ -1000,67 +1079,67 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
       continue;
     }
 
-    if (now < entry.userEditLockUntil) {
-      summary.skipped++;
+    if (now < normalizedMetadata.userEditLockUntil) {
+      namingSummary.skipped++;
       logger.debug('Auto group naming skipped', {
         windowId,
         groupId: group.id,
         reason: 'user-edit-lock',
-        userEditLockUntil: entry.userEditLockUntil,
+        userEditLockUntil: normalizedMetadata.userEditLockUntil,
       });
       continue;
     }
 
-    const unnamedDurationMs = now - entry.firstUnnamedSeenAt;
-    if (unnamedDurationMs < delayMs) {
-      summary.skipped++;
+    const timeSinceFirstSeenUnnamed = now - normalizedMetadata.firstUnnamedSeenAt;
+    if (timeSinceFirstSeenUnnamed < namingDelayMs) {
+      namingSummary.skipped++;
       logger.debug('Auto group naming skipped', {
         windowId,
         groupId: group.id,
         reason: 'below-delay-threshold',
-        unnamedDurationMs,
-        delayMs,
+        unnamedDurationMs: timeSinceFirstSeenUnnamed,
+        delayMs: namingDelayMs,
       });
       continue;
     }
 
-    summary.attempted++;
+    namingSummary.attempted++;
 
-    let groupTabs;
+    let tabsInGroup;
     try {
-      groupTabs = await chrome.tabs.query({ groupId: group.id });
-    } catch (err) {
-      summary.skipped++;
+      tabsInGroup = await chrome.tabs.query({ groupId: group.id });
+    } catch (error) {
+      namingSummary.skipped++;
       logger.warn('Auto group naming skipped: failed to query tabs', {
         windowId,
         groupId: group.id,
-        error: err.message,
+        error: error.message,
       });
       continue;
     }
 
-    const candidate = generateGroupNameFromTabs(groupTabs.filter((tab) => !tab.pinned));
-    const candidateName = normalizeCandidate(candidate?.name) || 'Tabs';
+    const generatedName = generateBestGroupNameFromTabs(tabsInGroup.filter((tab) => !tab.pinned));
+    const normalizedCandidateName = normalizeCandidateToOneOrTwoWords(generatedName?.name) || 'Tabs';
 
-    let liveGroup;
+    let liveGroupState;
     try {
-      liveGroup = await chrome.tabGroups.get(group.id);
-    } catch (err) {
-      summary.skipped++;
-      removeGroupNamingEntry(ws, group.id);
+      liveGroupState = await chrome.tabGroups.get(group.id);
+    } catch (error) {
+      namingSummary.skipped++;
+      removeGroupNamingMetadata(windowEntry, group.id);
       logger.debug('Auto group naming skipped: group no longer exists', {
         windowId,
         groupId: group.id,
-        error: err.message,
+        error: error.message,
       });
       continue;
     }
 
-    const liveTitle = liveGroup?.title || '';
-    const { baseName: liveBaseName, ageSuffix } = parseGroupTitle(liveTitle);
-    if (liveBaseName.length > 0) {
-      summary.skipped++;
-      removeGroupNamingEntry(ws, group.id);
+    const currentTitle = liveGroupState?.title || '';
+    const { baseName: currentBaseName, ageSuffix } = separateGroupTitleFromAgeSuffix(currentTitle);
+    if (currentBaseName.length > 0) {
+      namingSummary.skipped++;
+      removeGroupNamingMetadata(windowEntry, group.id);
       logger.info('Auto group naming decision', {
         windowId,
         groupId: group.id,
@@ -1070,10 +1149,10 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
       continue;
     }
 
-    const latestEntry = normalizeGroupNamingEntry(getGroupNamingEntry(ws, group.id), now);
-    setGroupNamingEntry(ws, group.id, latestEntry);
-    if (now < latestEntry.userEditLockUntil) {
-      summary.skipped++;
+    const latestMetadata = normalizeGroupNamingMetadata(getGroupNamingMetadata(windowEntry, group.id), now);
+    setGroupNamingMetadata(windowEntry, group.id, latestMetadata);
+    if (now < latestMetadata.userEditLockUntil) {
+      namingSummary.skipped++;
       logger.info('Auto group naming decision', {
         windowId,
         groupId: group.id,
@@ -1083,13 +1162,13 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
       continue;
     }
 
-    const newTitle = composeGroupTitle(candidateName, ageSuffix);
-    if (!newTitle || newTitle === liveTitle) {
-      summary.skipped++;
-      setGroupNamingEntry(ws, group.id, {
-        ...latestEntry,
+    const proposedTitle = combineGroupTitleWithAgeSuffix(normalizedCandidateName, ageSuffix);
+    if (!proposedTitle || proposedTitle === currentTitle) {
+      namingSummary.skipped++;
+      setGroupNamingMetadata(windowEntry, group.id, {
+        ...latestMetadata,
         lastAutoNamedAt: now,
-        lastCandidate: candidateName,
+        lastCandidate: normalizedCandidateName,
         userEditLockUntil: now,
       });
       logger.info('Auto group naming decision', {
@@ -1102,134 +1181,144 @@ export async function autoNameEligibleGroups(windowId, tabMeta, windowState, con
     }
 
     try {
-      markExtensionTitleUpdate(group.id, newTitle, now);
-      await chrome.tabGroups.update(group.id, { title: newTitle });
-      summary.named++;
-      setGroupNamingEntry(ws, group.id, {
-        ...latestEntry,
+      recordPendingExtensionTitleChange(group.id, proposedTitle, now);
+      await chrome.tabGroups.update(group.id, { title: proposedTitle });
+      namingSummary.named++;
+      setGroupNamingMetadata(windowEntry, group.id, {
+        ...latestMetadata,
         lastAutoNamedAt: now,
-        lastCandidate: candidateName,
+        lastCandidate: normalizedCandidateName,
         userEditLockUntil: now,
       });
       logger.info('Auto group naming decision', {
         windowId,
         groupId: group.id,
         action: 'named',
-        candidate: candidateName,
-        candidateReason: candidate.reason,
+        candidate: normalizedCandidateName,
+        candidateReason: generatedName.reason,
       });
-    } catch (err) {
-      summary.skipped++;
+    } catch (error) {
+      namingSummary.skipped++;
       logger.warn('Auto group naming failed', {
         windowId,
         groupId: group.id,
-        candidate: candidateName,
-        error: err.message,
+        candidate: normalizedCandidateName,
+        error: error.message,
       });
     }
   }
 
-  return summary;
+  return namingSummary;
 }
 
-export async function updateGroupTitlesWithAge(windowId, tabMeta, windowState, activeTimeMs, settings) {
-  let updated = 0;
+/**
+ * Appends an age suffix (e.g. "(2h)") to all user group titles in a window.
+ */
+export async function appendAgeToAllGroupTitles(windowId, tabMeta, windowState, activeTimeMs, settings) {
+  let groupsUpdated = 0;
   try {
-    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    const allGroups = await chrome.tabGroups.query({ windowId: Number(windowId) });
 
-    for (const group of groups) {
-      if (isSpecialGroup(group.id, windowId, windowState)) continue;
+    for (const group of allGroups) {
+      if (isManagedAgingGroup(group.id, windowId, windowState)) continue;
 
-      const age = computeGroupAge(group.id, tabMeta, activeTimeMs, settings);
-      if (age === 0) continue;
+      const groupAge = calculateAgeOfFreshestTabInGroup(group.id, tabMeta, activeTimeMs, settings);
+      if (groupAge === 0) continue;
 
-      const { baseName } = parseGroupTitle(group.title);
-      const ageSuffix = `(${formatAge(age)})`;
-      const newTitle = composeGroupTitle(baseName, ageSuffix);
+      const { baseName } = separateGroupTitleFromAgeSuffix(group.title);
+      const ageSuffix = `(${formatAgeAsShortString(groupAge)})`;
+      const titleWithAge = combineGroupTitleWithAgeSuffix(baseName, ageSuffix);
 
-      if (newTitle !== group.title) {
+      if (titleWithAge !== group.title) {
         try {
-          markExtensionTitleUpdate(group.id, newTitle);
-          const result = await chrome.tabGroups.update(group.id, { title: newTitle });
-          updated++;
-          logger.debug('Updated group title with age', { groupId: group.id, newTitle, resultTitle: result?.title });
-        } catch (err) {
+          recordPendingExtensionTitleChange(group.id, titleWithAge);
+          const updateResult = await chrome.tabGroups.update(group.id, { title: titleWithAge });
+          groupsUpdated++;
+          logger.debug('Updated group title with age', { groupId: group.id, newTitle: titleWithAge, resultTitle: updateResult?.title });
+        } catch (error) {
           logger.warn('Failed to update group title with age', {
             groupId: group.id,
-            newTitle,
-            error: err.message,
+            newTitle: titleWithAge,
+            error: error.message,
           });
         }
       }
     }
-  } catch (err) {
+  } catch (error) {
     logger.error('Failed to update group titles with age', {
       windowId,
-      error: err.message,
+      error: error.message,
     });
   }
-  return { updated };
+  return { updated: groupsUpdated };
 }
 
-export async function removeAgeSuffixFromAllGroups(windowId, windowState) {
+/**
+ * Removes the age suffix from all group titles in a window.
+ * Called when the "show group age" setting is turned off.
+ */
+export async function removeAgeSuffixFromAllGroupTitles(windowId, windowState) {
   try {
-    const groups = await chrome.tabGroups.query({ windowId: Number(windowId) });
-    for (const group of groups) {
-      if (isSpecialGroup(group.id, windowId, windowState)) continue;
-      const baseName = stripAgeSuffix(group.title);
-      if (baseName !== group.title) {
+    const allGroups = await chrome.tabGroups.query({ windowId: Number(windowId) });
+    for (const group of allGroups) {
+      if (isManagedAgingGroup(group.id, windowId, windowState)) continue;
+      const titleWithoutAge = removeAgeSuffixFromTitle(group.title);
+      if (titleWithoutAge !== group.title) {
         try {
-          markExtensionTitleUpdate(group.id, baseName);
-          await chrome.tabGroups.update(group.id, { title: baseName });
+          recordPendingExtensionTitleChange(group.id, titleWithoutAge);
+          await chrome.tabGroups.update(group.id, { title: titleWithoutAge });
         } catch { /* best effort */ }
       }
     }
   } catch { /* best effort */ }
 }
 
-export async function ungroupTab(tabId) {
+/**
+ * Removes a tab from whatever group it's in.
+ * Returns true on success, false on failure.
+ */
+export async function removeTabFromItsGroup(tabId) {
   try {
     await chrome.tabs.ungroup(tabId);
     return true;
-  } catch (err) {
-    logger.warn('Failed to ungroup tab', { tabId, error: err.message });
+  } catch (error) {
+    logger.warn('Failed to ungroup tab', { tabId, error: error.message });
     return false;
   }
 }
 
 /**
- * Dissolve special groups in a window: ungroup all tabs and clear references.
- * Used when tabSortingEnabled is turned off.
- * Tabs stay in place — only the group wrapper is removed.
+ * Dissolves managed aging groups in a window: ungroups all tabs and clears references.
+ * Called when tabSortingEnabled is turned off. Tabs stay in place — only the group wrapper is removed.
  */
-export async function dissolveSpecialGroups(windowId, windowState) {
-  const ws = windowState[windowId] || windowState[String(windowId)];
-  if (!ws) return { dissolved: 0 };
+export async function dissolveManagedGroupsInWindow(windowId, windowState) {
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
+  if (!windowEntry) return { dissolved: 0 };
 
-  let dissolved = 0;
+  let groupsDissolved = 0;
 
-  for (const type of ['yellow', 'red']) {
-    const groupId = ws.specialGroups[type];
+  for (const groupType of ['yellow', 'red']) {
+    const groupId = windowEntry.specialGroups[groupType];
     if (groupId === null) continue;
 
     try {
-      const tabs = await chrome.tabs.query({ groupId });
-      let allUngrouped = true;
-      for (const tab of tabs) {
-        const ok = await ungroupTab(tab.id);
-        if (!ok) allUngrouped = false;
+      const tabsInGroup = await chrome.tabs.query({ groupId });
+      let allTabsUngrouped = true;
+      for (const tab of tabsInGroup) {
+        const wasUngrouped = await removeTabFromItsGroup(tab.id);
+        if (!wasUngrouped) allTabsUngrouped = false;
       }
-      if (allUngrouped) {
-        ws.specialGroups[type] = null;
-        dissolved++;
-        logger.debug('Dissolved special group', { windowId, type, groupId, tabCount: tabs.length });
+      if (allTabsUngrouped) {
+        windowEntry.specialGroups[groupType] = null;
+        groupsDissolved++;
+        logger.debug('Dissolved special group', { windowId, type: groupType, groupId, tabCount: tabsInGroup.length });
       } else {
-        logger.warn('Partial dissolution, retaining special group reference', { windowId, type, groupId });
+        logger.warn('Partial dissolution, retaining special group reference', { windowId, type: groupType, groupId });
       }
-    } catch (err) {
-      logger.warn('Failed to dissolve special group', { windowId, type, groupId, error: err.message });
+    } catch (error) {
+      logger.warn('Failed to dissolve special group', { windowId, type: groupType, groupId, error: error.message });
     }
   }
 
-  return { dissolved };
+  return { dissolved: groupsDissolved };
 }

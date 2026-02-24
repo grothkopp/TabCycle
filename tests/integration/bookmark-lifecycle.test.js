@@ -84,7 +84,7 @@ globalThis.chrome = {
   tabGroups: mockTabGroups,
 };
 
-import { resolveBookmarkFolder, isBookmarkableUrl, bookmarkTab, bookmarkGroupTabs } from '../../src/background/bookmark-manager.js';
+import { findOrCreateBookmarkFolderForClosedTabs, isUrlWorthBookmarking, createBookmarkForSingleTab, createBookmarkSubfolderForTabGroup } from '../../src/background/bookmark-manager.js';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -142,13 +142,13 @@ describe('Bookmark lifecycle: individual tab close', () => {
     tabStore[1] = { id: 1, title: 'Example', url: 'https://example.com', windowId: 1 };
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
 
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
     expect(folderId).toBeTruthy();
 
     const tab = await chrome.tabs.get(1);
-    expect(isBookmarkableUrl(tab.url)).toBe(true);
+    expect(isUrlWorthBookmarking(tab.url)).toBe(true);
 
-    const success = await bookmarkTab(tab, folderId);
+    const success = await createBookmarkForSingleTab(tab, folderId);
     expect(success).toBe(true);
 
     // Verify bookmark was created in the folder
@@ -174,26 +174,26 @@ describe('Bookmark lifecycle: individual tab close', () => {
     tabStore[2] = { id: 2, title: 'New Tab', url: 'chrome://newtab', windowId: 1 };
     const tab = await chrome.tabs.get(2);
 
-    expect(isBookmarkableUrl(tab.url)).toBe(false);
+    expect(isUrlWorthBookmarking(tab.url)).toBe(false);
   });
 
   it('should not create bookmark for about:blank URL', async () => {
     tabStore[3] = { id: 3, title: '', url: 'about:blank', windowId: 1 };
     const tab = await chrome.tabs.get(3);
 
-    expect(isBookmarkableUrl(tab.url)).toBe(false);
+    expect(isUrlWorthBookmarking(tab.url)).toBe(false);
   });
 
   it('should still remove tab when bookmark creation fails', async () => {
     tabStore[4] = { id: 4, title: 'Fail Tab', url: 'https://fail.com', windowId: 1 };
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
 
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     // Make bookmark creation fail
     mockBookmarks.create.mockRejectedValueOnce(new Error('Bookmark API error'));
 
-    const success = await bookmarkTab(tabStore[4], folderId);
+    const success = await createBookmarkForSingleTab(tabStore[4], folderId);
     expect(success).toBe(false);
 
     // Tab removal should still succeed
@@ -207,7 +207,7 @@ describe('Bookmark lifecycle: individual tab close', () => {
     // No folder exists yet
     expect(Object.values(bookmarkNodes)).toHaveLength(0);
 
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     // Folder should now exist
     expect(folderId).toBeTruthy();
@@ -222,7 +222,7 @@ describe('Bookmark lifecycle: individual tab close', () => {
     storageBacking['v1_bookmarkState'] = { folderId: folder.id };
 
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     expect(folderId).toBe(folder.id);
     // Should not have created a new folder
@@ -234,14 +234,14 @@ describe('Bookmark lifecycle: individual tab close', () => {
 describe('Bookmark lifecycle: group close', () => {
   it('should create subfolder with group name and bookmark each tab', async () => {
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     const tabs = [
       { id: 10, title: 'Tab A', url: 'https://a.com' },
       { id: 11, title: 'Tab B', url: 'https://b.com' },
     ];
 
-    const result = await bookmarkGroupTabs('Research', tabs, folderId);
+    const result = await createBookmarkSubfolderForTabGroup('Research', tabs, folderId);
 
     expect(result.created).toBe(2);
     expect(result.skipped).toBe(0);
@@ -258,10 +258,10 @@ describe('Bookmark lifecycle: group close', () => {
 
   it('should use "(unnamed)" for unnamed group', async () => {
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     const tabs = [{ id: 20, title: 'Tab', url: 'https://x.com' }];
-    await bookmarkGroupTabs('', tabs, folderId);
+    await createBookmarkSubfolderForTabGroup('', tabs, folderId);
 
     const subfolders = Object.values(bookmarkNodes).filter((n) => !n.url && n.parentId === folderId);
     expect(subfolders).toHaveLength(1);
@@ -270,7 +270,7 @@ describe('Bookmark lifecycle: group close', () => {
 
   it('should skip tabs with blocklisted URLs in group', async () => {
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
     const tabs = [
       { id: 30, title: 'Good', url: 'https://good.com' },
@@ -278,7 +278,7 @@ describe('Bookmark lifecycle: group close', () => {
       { id: 32, title: '', url: 'about:blank' },
     ];
 
-    const result = await bookmarkGroupTabs('Mixed', tabs, folderId);
+    const result = await createBookmarkSubfolderForTabGroup('Mixed', tabs, folderId);
 
     expect(result.created).toBe(1);
     expect(result.skipped).toBe(2);
@@ -286,10 +286,10 @@ describe('Bookmark lifecycle: group close', () => {
 
   it('should create separate subfolders for groups with same name', async () => {
     const settings = { bookmarkEnabled: true, bookmarkFolderName: 'Closed Tabs' };
-    const folderId = await resolveBookmarkFolder(settings);
+    const folderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
 
-    await bookmarkGroupTabs('Work', [{ id: 40, title: 'Tab 1', url: 'https://a.com' }], folderId);
-    await bookmarkGroupTabs('Work', [{ id: 41, title: 'Tab 2', url: 'https://b.com' }], folderId);
+    await createBookmarkSubfolderForTabGroup('Work', [{ id: 40, title: 'Tab 1', url: 'https://a.com' }], folderId);
+    await createBookmarkSubfolderForTabGroup('Work', [{ id: 41, title: 'Tab 2', url: 'https://b.com' }], folderId);
 
     const subfolders = Object.values(bookmarkNodes).filter((n) => !n.url && n.parentId === folderId);
     expect(subfolders).toHaveLength(2);

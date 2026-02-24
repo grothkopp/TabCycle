@@ -30,7 +30,7 @@ globalThis.chrome = {
   tabGroups: { TAB_GROUP_ID_NONE: -1 },
 };
 
-const { readState, writeState, batchWrite, removeKeys } = await import('../../src/background/state-persistence.js');
+const { readValidatedStateFromStorage, writeValidatedStateToStorage, writeMultipleStateEntries, removeKeysFromStorage } = await import('../../src/background/state-persistence.js');
 const { STORAGE_KEYS } = await import('../../src/shared/constants.js');
 
 describe('storage-persistence integration', () => {
@@ -49,8 +49,8 @@ describe('storage-persistence integration', () => {
       },
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS]).toEqual(settings);
   });
@@ -67,8 +67,8 @@ describe('storage-persistence integration', () => {
       autoGroupNamingDelayMinutes: 9,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingEnabled).toBe(false);
     expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingDelayMinutes).toBe(9);
@@ -86,8 +86,8 @@ describe('storage-persistence integration', () => {
       autoGroupNamingDelayMinutes: 0,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingEnabled).toBe('yes');
     expect(result[STORAGE_KEYS.SETTINGS].autoGroupNamingDelayMinutes).toBe(0);
@@ -100,8 +100,8 @@ describe('storage-persistence integration', () => {
       lastPersistedAt: Date.now(),
     };
 
-    await writeState({ [STORAGE_KEYS.ACTIVE_TIME]: activeTime });
-    const result = await readState([STORAGE_KEYS.ACTIVE_TIME]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.ACTIVE_TIME]: activeTime });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.ACTIVE_TIME]);
 
     expect(result[STORAGE_KEYS.ACTIVE_TIME].accumulatedMs).toBe(12345);
     expect(result[STORAGE_KEYS.ACTIVE_TIME].focusStartTime).toBeNull();
@@ -119,44 +119,44 @@ describe('storage-persistence integration', () => {
       },
     };
 
-    await batchWrite({
+    await writeMultipleStateEntries({
       [STORAGE_KEYS.SETTINGS]: settings,
       [STORAGE_KEYS.TAB_META]: tabMeta,
     });
 
-    const result = await readState([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_META]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_META]);
     expect(result[STORAGE_KEYS.SETTINGS].timeMode).toBe('wallclock');
     expect(result[STORAGE_KEYS.TAB_META][1].tabId).toBe(1);
   });
 
   it('should handle reading non-existent keys gracefully', async () => {
-    const result = await readState([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_META]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS, STORAGE_KEYS.TAB_META]);
     expect(result[STORAGE_KEYS.SETTINGS]).toBeUndefined();
     expect(result[STORAGE_KEYS.TAB_META]).toBeUndefined();
   });
 
   it('should remove keys from storage', async () => {
-    await writeState({ [STORAGE_KEYS.TAB_META]: { 1: { tabId: 1 } } });
-    await removeKeys([STORAGE_KEYS.TAB_META]);
-    const result = await readState([STORAGE_KEYS.TAB_META]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.TAB_META]: { 1: { tabId: 1 } } });
+    await removeKeysFromStorage([STORAGE_KEYS.TAB_META]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
     expect(result[STORAGE_KEYS.TAB_META]).toBeUndefined();
   });
 
   it('should warn on invalid data read but still return it', async () => {
     store[STORAGE_KEYS.SETTINGS] = { timeMode: 'invalid' };
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
     expect(result[STORAGE_KEYS.SETTINGS].timeMode).toBe('invalid');
   });
 
-  it('should skip batchWrite for empty changes', async () => {
-    await batchWrite({});
+  it('should skip writeMultipleStateEntries for empty changes', async () => {
+    await writeMultipleStateEntries({});
     expect(chrome.storage.local.set).not.toHaveBeenCalled();
   });
 
   it('should handle overwriting existing data', async () => {
-    await writeState({ [STORAGE_KEYS.SCHEMA_VERSION]: 1 });
-    await writeState({ [STORAGE_KEYS.SCHEMA_VERSION]: 2 });
-    const result = await readState([STORAGE_KEYS.SCHEMA_VERSION]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SCHEMA_VERSION]: 1 });
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SCHEMA_VERSION]: 2 });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SCHEMA_VERSION]);
     expect(result[STORAGE_KEYS.SCHEMA_VERSION]).toBe(2);
   });
 
@@ -177,14 +177,14 @@ describe('storage-persistence integration', () => {
       },
     };
 
-    await writeState({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
-    const result = await readState([STORAGE_KEYS.WINDOW_STATE]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.WINDOW_STATE]);
     expect(result[STORAGE_KEYS.WINDOW_STATE]).toEqual(windowState);
   });
 
   it('should allow cleanup of stale groupNaming entries by overwriting windowState', async () => {
     const now = Date.now();
-    await writeState({
+    await writeValidatedStateToStorage({
       [STORAGE_KEYS.WINDOW_STATE]: {
         1: {
           specialGroups: { yellow: null, red: null },
@@ -208,9 +208,9 @@ describe('storage-persistence integration', () => {
         groupNaming: {},
       },
     };
-    await batchWrite({ [STORAGE_KEYS.WINDOW_STATE]: cleanedState });
+    await writeMultipleStateEntries({ [STORAGE_KEYS.WINDOW_STATE]: cleanedState });
 
-    const result = await readState([STORAGE_KEYS.WINDOW_STATE]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.WINDOW_STATE]);
     expect(result[STORAGE_KEYS.WINDOW_STATE]).toEqual(cleanedState);
   });
 
@@ -226,8 +226,8 @@ describe('storage-persistence integration', () => {
       tabgroupColoringEnabled: false,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
     expect(result[STORAGE_KEYS.SETTINGS].tabSortingEnabled).toBe(false);
@@ -244,8 +244,8 @@ describe('storage-persistence integration', () => {
       redToGoneEnabled: false,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].greenToYellowEnabled).toBe(false);
     expect(result[STORAGE_KEYS.SETTINGS].yellowToRedEnabled).toBe(true);
@@ -260,8 +260,8 @@ describe('storage-persistence integration', () => {
       redGroupName: 'Urgent',
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].yellowGroupName).toBe('');
     expect(result[STORAGE_KEYS.SETTINGS].redGroupName).toBe('Urgent');
@@ -274,8 +274,8 @@ describe('storage-persistence integration', () => {
       autoGroupEnabled: false,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS].autoGroupEnabled).toBe(false);
   });
@@ -301,8 +301,8 @@ describe('storage-persistence integration', () => {
       autoGroupNamingDelayMinutes: 15,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: fullSettings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: fullSettings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     expect(result[STORAGE_KEYS.SETTINGS]).toEqual(fullSettings);
   });
@@ -321,8 +321,8 @@ describe('storage-persistence integration', () => {
       redToGoneEnabled: false,
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: settings });
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: settings });
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
 
     // All disabled child values must be preserved (not reset to defaults)
     expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
@@ -342,16 +342,16 @@ describe('storage-persistence integration', () => {
       yellowGroupName: 'Old Name',
     };
 
-    await writeState({ [STORAGE_KEYS.SETTINGS]: initial });
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: initial });
 
     const updated = {
       ...initial,
       agingEnabled: false,
       yellowGroupName: 'New Name',
     };
-    await writeState({ [STORAGE_KEYS.SETTINGS]: updated });
+    await writeValidatedStateToStorage({ [STORAGE_KEYS.SETTINGS]: updated });
 
-    const result = await readState([STORAGE_KEYS.SETTINGS]);
+    const result = await readValidatedStateFromStorage([STORAGE_KEYS.SETTINGS]);
     expect(result[STORAGE_KEYS.SETTINGS].agingEnabled).toBe(false);
     expect(result[STORAGE_KEYS.SETTINGS].yellowGroupName).toBe('New Name');
   });
