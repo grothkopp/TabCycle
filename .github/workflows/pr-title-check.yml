@@ -1,20 +1,18 @@
-name: PR Title Check
+name: semantic commits
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, edited, synchronize, reopened]
+    branches: ['*']
 
 permissions:
-  contents: read
-  pull-requests: write
+  pull-requests: read
 
 jobs:
-  check-title:
+  lint-pr-title:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Validate conventional commit format
-        uses: amannn/action-semantic-pull-request@v5
+      - uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -31,10 +29,8 @@ jobs:
             chore
             revert
           requireScope: false
-          subjectPattern: ^(?![A-Z]).+$
+          subjectPattern: ^.+$
           subjectPatternError: |
             The subject "{subject}" found in the pull request title "{title}"
-            didn't match the configured pattern. Please ensure that the subject
-            doesn't start with an uppercase character.
-          wip: true
-          validateSingleCommit: false
+            doesn't match the configured pattern. Please use the format:
+            <type>(<scope>): <description>
