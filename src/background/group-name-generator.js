@@ -60,12 +60,23 @@ function capitalizeFirstLetterOfEachWord(text) {
  * Splits on separators like |, /, -, etc., normalizes each token,
  * and filters out stop words and short/numeric tokens.
  *
+ * Invisible non-separating characters (U+00AD soft hyphen, U+200C zero-width
+ * non-joiner, U+200D zero-width joiner, U+FEFF byte-order mark / zero-width
+ * no-break space, U+2060 word joiner) are stripped before tokenization so that
+ * compound words containing them stay intact instead of being split into fragments.
+ *
+ * Characters that legitimately act as word separators (U+200B zero-width space,
+ * U+00A0 non-breaking space) are left in place; they are not matched by
+ * [\p{L}\p{N}]+ and therefore naturally cause word boundaries — which is the
+ * correct behaviour.
+ *
  * @param {string} text - The text to tokenize (usually a tab title)
  * @returns {string[]} Array of normalized, meaningful words
  */
 export function extractMeaningfulWordsFromText(text) {
   if (!text) return [];
-  const withSeparatorsAsSpaces = String(text)
+  const stripped = String(text).replace(/[\u00AD\u200C\u200D\uFEFF\u2060]/g, '');
+  const withSeparatorsAsSpaces = stripped
     .toLowerCase()
     .replace(/[|:/\\\-_–—•·]+/g, ' ');
   const rawWords = withSeparatorsAsSpaces.match(/[\p{L}\p{N}]+/gu) || [];
