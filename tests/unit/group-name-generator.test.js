@@ -105,4 +105,29 @@ describe('group-name-generator', () => {
       expect(ranked[0].text).toBeDefined();
     }
   });
+
+  it('correctly tokenizes words containing German umlauts', () => {
+    const tokens = extractMeaningfulWordsFromText('Gärtnerei Pflanzencenter');
+    expect(tokens).toContain('gärtnerei');
+    expect(tokens).toContain('pflanzencenter');
+    expect(tokens).not.toContain('rtnerei');
+  });
+
+  it('correctly tokenizes words starting with German umlauts', () => {
+    const tokens = extractMeaningfulWordsFromText('Äpfel und Öl aus der Mühle');
+    expect(tokens).toContain('äpfel');
+    expect(tokens).toContain('mühle');
+  });
+
+  it('generates the correct group name for tabs with German umlaut titles', () => {
+    const result = generateBestGroupNameFromTabs([
+      { title: 'Gärtnerei Mustermann - Pflanzen & Zubehör', url: 'https://example.com/1' },
+      { title: 'Gärtnerei Mustermann - Kontakt', url: 'https://example.com/2' },
+    ]);
+    // The name should include the full word "Gärtnerei" with the umlaut intact,
+    // not a truncated version like "rtnerei" (which was the bug).
+    expect(result.name.toLowerCase()).toContain('gärtnerei');
+    // Verify the umlaut was not dropped (buggy output started with 'r' not 'gä')
+    expect(result.name.toLowerCase()).not.toMatch(/^rtnerei/);
+  });
 });

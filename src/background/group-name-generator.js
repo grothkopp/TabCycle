@@ -30,13 +30,15 @@ const COMMON_HOSTNAME_PARTS_TO_IGNORE = new Set([
 /**
  * Normalizes a raw token: lowercases, strips non-alphanumeric edges,
  * and rejects tokens that are too short, purely numeric, or stop words.
+ * Uses Unicode-aware character classes to correctly handle umlauts and
+ * other non-ASCII letters (e.g. ä, ö, ü, ß).
  * @returns {string} The cleaned token, or empty string if rejected
  */
 function normalizeWordOrReject(rawWord) {
   if (!rawWord) return '';
-  const cleaned = rawWord.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  const cleaned = rawWord.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
   if (cleaned.length < 2) return '';
-  if (/^\d+$/.test(cleaned)) return '';
+  if (/^\d+$/u.test(cleaned)) return '';
   if (WORDS_TO_IGNORE_IN_TAB_TITLES.has(cleaned)) return '';
   return cleaned;
 }
@@ -66,7 +68,7 @@ export function extractMeaningfulWordsFromText(text) {
   const withSeparatorsAsSpaces = String(text)
     .toLowerCase()
     .replace(/[|:/\\\-_–—•·]+/g, ' ');
-  const rawWords = withSeparatorsAsSpaces.match(/[a-z0-9]+/g) || [];
+  const rawWords = withSeparatorsAsSpaces.match(/[\p{L}\p{N}]+/gu) || [];
   return rawWords
     .map(normalizeWordOrReject)
     .filter(Boolean);
