@@ -38,7 +38,7 @@ function normalizeWordOrReject(rawWord) {
   if (!rawWord) return '';
   const cleaned = rawWord.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
   if (cleaned.length < 2) return '';
-  if (/^\d+$/u.test(cleaned)) return '';
+  if (/^\p{N}+$/u.test(cleaned)) return '';
   if (WORDS_TO_IGNORE_IN_TAB_TITLES.has(cleaned)) return '';
   return cleaned;
 }
