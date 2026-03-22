@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "TabCycle",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Unused tabs and tab groups turn from green to yellow to red and close as time passes.",
   "permissions": [
     "tabs",
