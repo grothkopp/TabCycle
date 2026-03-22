@@ -75,7 +75,7 @@ function capitalizeFirstLetterOfEachWord(text) {
  */
 export function extractMeaningfulWordsFromText(text) {
   if (!text) return [];
-  const stripped = String(text).replace(/[\u00AD\u200C\u200D\uFEFF\u2060]/g, '');
+  const stripped = String(text).replace(/\u00AD|\u200C|\u200D|\uFEFF|\u2060/g, '');
   const withSeparatorsAsSpaces = stripped
     .toLowerCase()
     .replace(/[|:/\\\-_–—•·]+/g, ' ');
