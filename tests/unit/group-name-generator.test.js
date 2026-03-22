@@ -105,4 +105,109 @@ describe('group-name-generator', () => {
       expect(ranked[0].text).toBeDefined();
     }
   });
+
+  it('correctly tokenizes words containing German umlauts', () => {
+    const tokens = extractMeaningfulWordsFromText('Gärtnerei Pflanzencenter');
+    expect(tokens).toContain('gärtnerei');
+    expect(tokens).toContain('pflanzencenter');
+    expect(tokens).not.toContain('rtnerei');
+  });
+
+  it('correctly tokenizes words starting with German umlauts', () => {
+    const tokens = extractMeaningfulWordsFromText('Äpfel und Öl aus der Mühle');
+    expect(tokens).toContain('äpfel');
+    expect(tokens).toContain('mühle');
+  });
+
+  it('generates the correct group name for tabs with German umlaut titles', () => {
+    const result = generateBestGroupNameFromTabs([
+      { title: 'Gärtnerei Mustermann - Pflanzen & Zubehör', url: 'https://example.com/1' },
+      { title: 'Gärtnerei Mustermann - Kontakt', url: 'https://example.com/2' },
+    ]);
+    // The name should include the full word "Gärtnerei" with the umlaut intact,
+    // not a truncated version like "rtnerei" (which was the bug).
+    expect(result.name.toLowerCase()).toContain('gärtnerei');
+    // Verify the umlaut was not dropped (buggy output started with 'r' not 'gä')
+    expect(result.name.toLowerCase()).not.toMatch(/^rtnerei/);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Invisible / hidden separator character handling
+  // ---------------------------------------------------------------------------
+  // Web pages embed various invisible Unicode characters in titles for
+  // formatting hints.  The tokenizer must handle them correctly so that words
+  // are not spuriously split or corrupted.
+
+  it('strips soft hyphen (U+00AD) so compound words are not split', () => {
+    // U+00AD is a word-break hint inserted by HTML authors.  "Projekt\u00ADmanagement"
+    // renders as the single word "Projektmanagement"; tokenizing it should yield
+    // the intact compound, not the fragments ["projekt", "management"].
+    const tokens = extractMeaningfulWordsFromText('Projekt\u00ADmanagement Software');
+    expect(tokens).toContain('projektmanagement');
+    expect(tokens).not.toContain('projekt');
+    expect(tokens).not.toContain('management');
+  });
+
+  it('strips zero-width joiner (U+200D) so joined characters stay together', () => {
+    // U+200D requests ligature/joining rendering; it should not act as a word boundary.
+    const tokens = extractMeaningfulWordsFromText('Vor\u200Dteil');
+    expect(tokens).toContain('vorteil');
+    expect(tokens).not.toContain('vor');
+  });
+
+  it('strips zero-width non-joiner (U+200C) so words are not spuriously split', () => {
+    // U+200C prevents ligature formation; in page titles it should be treated as
+    // invisible rather than as a separator.
+    const tokens = extractMeaningfulWordsFromText('Vor\u200Cteil');
+    expect(tokens).toContain('vorteil');
+    expect(tokens).not.toContain('vor');
+  });
+
+  it('strips byte-order mark / ZWNBSP (U+FEFF) so it does not split words', () => {
+    // A BOM at the start of a string or embedded in a title must not fragment words.
+    const tokens = extractMeaningfulWordsFromText('\uFEFFHello World');
+    expect(tokens).toContain('hello');
+    expect(tokens).toContain('world');
+    // Also verify mid-word BOM is stripped rather than causing a split
+    const midWordTokens = extractMeaningfulWordsFromText('Vor\uFEFFteil');
+    expect(midWordTokens).toContain('vorteil');
+    expect(midWordTokens).not.toContain('vor');
+  });
+
+  it('strips word joiner (U+2060) so it does not act as a separator', () => {
+    // U+2060 is a line-break inhibitor that should be invisible to tokenization.
+    const tokens = extractMeaningfulWordsFromText('Vor\u2060teil');
+    expect(tokens).toContain('vorteil');
+    expect(tokens).not.toContain('vor');
+  });
+
+  it('treats zero-width space (U+200B) as a word separator', () => {
+    // U+200B explicitly marks a valid word-break point, so it should act as a
+    // separator just like a regular space.  It is not matched by [\p{L}\p{N}]+
+    // and therefore naturally causes a word boundary — no special handling needed.
+    const tokens = extractMeaningfulWordsFromText('Vor\u200Bteil');
+    expect(tokens).toContain('vor');
+    expect(tokens).toContain('teil');
+    expect(tokens).not.toContain('vorteil');
+  });
+
+  it('treats non-breaking space (U+00A0) as a word separator', () => {
+    // U+00A0 is a space that prevents line breaks but still separates words.
+    // Like U+200B it is not matched by [\p{L}\p{N}]+ and naturally causes a
+    // word boundary — no special handling needed.
+    const tokens = extractMeaningfulWordsFromText('Hello\u00A0World');
+    expect(tokens).toContain('hello');
+    expect(tokens).toContain('world');
+    expect(tokens).not.toContain('hello\u00A0world');
+  });
+
+  it('generates correct group name when title contains soft hyphen in compound word', () => {
+    // Regression check: a site that inserts soft hyphens in long compound nouns
+    // should still be matched by the intact compound across tabs.
+    const result = generateBestGroupNameFromTabs([
+      { title: 'Projekt\u00ADmanagement Handbuch', url: 'https://example.com/1' },
+      { title: 'Projekt\u00ADmanagement Leitfaden', url: 'https://example.com/2' },
+    ]);
+    expect(result.name.toLowerCase()).toContain('projektmanagement');
+  });
 });

@@ -30,13 +30,15 @@ const COMMON_HOSTNAME_PARTS_TO_IGNORE = new Set([
 /**
  * Normalizes a raw token: lowercases, strips non-alphanumeric edges,
  * and rejects tokens that are too short, purely numeric, or stop words.
+ * Uses Unicode-aware character classes to correctly handle umlauts and
+ * other non-ASCII letters (e.g. ä, ö, ü, ß).
  * @returns {string} The cleaned token, or empty string if rejected
  */
 function normalizeWordOrReject(rawWord) {
   if (!rawWord) return '';
-  const cleaned = rawWord.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, '');
+  const cleaned = rawWord.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
   if (cleaned.length < 2) return '';
-  if (/^\d+$/.test(cleaned)) return '';
+  if (/^\p{N}+$/u.test(cleaned)) return '';
   if (WORDS_TO_IGNORE_IN_TAB_TITLES.has(cleaned)) return '';
   return cleaned;
 }
@@ -58,15 +60,26 @@ function capitalizeFirstLetterOfEachWord(text) {
  * Splits on separators like |, /, -, etc., normalizes each token,
  * and filters out stop words and short/numeric tokens.
  *
+ * Invisible non-separating characters (U+00AD soft hyphen, U+200C zero-width
+ * non-joiner, U+200D zero-width joiner, U+FEFF byte-order mark / zero-width
+ * no-break space, U+2060 word joiner) are stripped before tokenization so that
+ * compound words containing them stay intact instead of being split into fragments.
+ *
+ * Characters that legitimately act as word separators (U+200B zero-width space,
+ * U+00A0 non-breaking space) are left in place; they are not matched by
+ * [\p{L}\p{N}]+ and therefore naturally cause word boundaries — which is the
+ * correct behaviour.
+ *
  * @param {string} text - The text to tokenize (usually a tab title)
  * @returns {string[]} Array of normalized, meaningful words
  */
 export function extractMeaningfulWordsFromText(text) {
   if (!text) return [];
-  const withSeparatorsAsSpaces = String(text)
+  const stripped = String(text).replace(/\u00AD|\u200C|\u200D|\uFEFF|\u2060/g, '');
+  const withSeparatorsAsSpaces = stripped
     .toLowerCase()
     .replace(/[|:/\\\-_–—•·]+/g, ' ');
-  const rawWords = withSeparatorsAsSpaces.match(/[a-z0-9]+/g) || [];
+  const rawWords = withSeparatorsAsSpaces.match(/[\p{L}\p{N}]+/gu) || [];
   return rawWords
     .map(normalizeWordOrReject)
     .filter(Boolean);
