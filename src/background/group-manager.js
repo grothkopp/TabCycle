@@ -727,16 +727,24 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
           (entry) => entry.groupId === goneGroupId && entry.windowId === Number(windowId) && !entry.pinned
         );
         for (const tabEntry of tabsInGoneGroup) {
+          let tabStillExists = false;
           try {
             await chrome.tabs.remove(tabEntry.tabId);
           } catch (error) {
-            logger.warn('Failed to remove tab from gone group', { tabId: tabEntry.tabId, groupId: goneGroupId, error: error.message });
+            // Check whether the tab is genuinely gone or still alive but temporarily unremovable.
+            // Only preserve tabMeta for tabs that are confirmed to still exist in Chrome,
+            // otherwise stale "gone" entries cause infinite re-bookmarking loops.
+            const msg = error?.message || '';
+            const isTabGone = msg.includes('No tab with id');
+            tabStillExists = !isTabGone;
+            logger.warn('Failed to remove tab from gone group', {
+              tabId: tabEntry.tabId, groupId: goneGroupId, error: msg, tabStillExists,
+            });
           }
-          // Always clean up tabMeta, even if chrome.tabs.remove failed
-          // (tab may already be closed). Without this, stale "gone" entries
-          // cause the group to be re-bookmarked on every evaluation cycle.
-          delete tabMeta[tabEntry.tabId];
-          delete tabMeta[String(tabEntry.tabId)];
+          if (!tabStillExists) {
+            delete tabMeta[tabEntry.tabId];
+            delete tabMeta[String(tabEntry.tabId)];
+          }
         }
 
         delete windowEntry.groupZones[goneGroupId];

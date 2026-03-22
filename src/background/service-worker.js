@@ -1441,19 +1441,6 @@ async function performReconciliation(correlationId) {
           }
         }
 
-        // Re-apply colors to managed groups — Chrome may reset them to grey on restart
-        for (const groupType of ['yellow', 'red']) {
-          const groupId = remappedSpecialGroups[groupType];
-          if (groupId === null) continue;
-          try {
-            await chrome.tabGroups.update(groupId, { color: groupType });
-          } catch (error) {
-            logger.warn('Failed to restore managed group color after restart', {
-              groupType, groupId, error: error.message,
-            });
-          }
-        }
-
         const remappedGroupNaming = {};
         for (const [storedGroupId, namingMetadata] of Object.entries(storedGroupNaming)) {
           const numericGroupId = Number(storedGroupId);
@@ -1499,8 +1486,39 @@ async function performReconciliation(correlationId) {
       }
     }
 
+    // Persist reconciled state BEFORE recoloring managed groups, so that any
+    // onUpdated handlers triggered by chrome.tabGroups.update read the correct
+    // remapped special group IDs rather than stale pre-restart values.
     await writeMultipleStateEntries({
       [STORAGE_KEYS.TAB_META]: reconciledTabMeta,
+      [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
+    });
+
+    // Re-apply colors to managed groups — Chrome may reset them to grey on restart.
+    for (const [, windowEntry] of Object.entries(reconciledWindowState)) {
+      const specialGroups = windowEntry?.specialGroups;
+      if (!specialGroups) continue;
+      for (const groupType of ['yellow', 'red']) {
+        const groupId = specialGroups[groupType];
+        if (groupId === null) continue;
+        try {
+          await chrome.tabGroups.update(groupId, { color: groupType });
+        } catch (error) {
+          const msg = error?.message || '';
+          // If the group no longer exists, clear the stale reference to avoid
+          // persisting a dangling special group ID.
+          if (msg.includes('No group with id') || msg.includes('No tab group with id')) {
+            specialGroups[groupType] = null;
+          }
+          logger.warn('Failed to restore managed group color after restart', {
+            correlationId, groupType, groupId, error: msg,
+          });
+        }
+      }
+    }
+
+    // Re-persist if any stale special group references were cleared during recoloring.
+    await writeMultipleStateEntries({
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
     });
 

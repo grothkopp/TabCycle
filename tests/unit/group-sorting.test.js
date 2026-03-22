@@ -1493,8 +1493,9 @@ describe('group-sorting', () => {
       expect(windowState[1].groupZones[5]).toBe('green');
     });
 
-    it('should clean up tabMeta even when chrome.tabs.remove fails for a gone group', async () => {
-      // Tab 10 closes successfully, tab 20 fails → both cleaned from tabMeta to prevent re-bookmarking loop
+    it('should preserve tabMeta when chrome.tabs.remove fails with a transient error', async () => {
+      // Tab 10 closes successfully, tab 20 fails with a transient error (not "No tab with id")
+      // → tab 20 stays in tabMeta so it remains managed and can be retried.
       const groups = [
         { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
       ];
@@ -1508,7 +1509,7 @@ describe('group-sorting', () => {
       chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
       chrome.tabs.remove
         .mockResolvedValueOnce(undefined)          // tab 10 succeeds
-        .mockRejectedValueOnce(new Error('Tab is uneditable'));  // tab 20 fails
+        .mockRejectedValueOnce(new Error('Tab is uneditable'));  // tab 20 fails (transient)
 
       const tabMeta = {
         10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
@@ -1525,8 +1526,43 @@ describe('group-sorting', () => {
       expect(result.goneGroupsClosed).toBe(1);
       // Tab 10 was successfully closed → removed from tabMeta
       expect(tabMeta[10]).toBeUndefined();
-      // Tab 20 failed to close → tabMeta still cleaned up to prevent
-      // infinite re-bookmarking loops (tab is already gone from Chrome)
+      // Tab 20 failed with transient error → stays in tabMeta so it remains managed
+      expect(tabMeta[20]).toBeDefined();
+    });
+
+    it('should clean up tabMeta when chrome.tabs.remove fails with "No tab with id"', async () => {
+      // Tab already gone from Chrome → "No tab with id" error → clean up tabMeta
+      // to prevent the infinite re-bookmarking loop.
+      const groups = [
+        { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false, url: 'https://a.com', title: 'A' },
+        { id: 20, windowId: 1, groupId: 5, pinned: false, url: 'https://b.com', title: 'B' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      chrome.tabGroups.get.mockResolvedValue({ id: 5, title: 'OldGroup', color: 'red' });
+      chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
+      chrome.tabs.remove
+        .mockResolvedValueOnce(undefined)                          // tab 10 succeeds
+        .mockRejectedValueOnce(new Error('No tab with id: 20.')); // tab 20 already gone
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
+
+      expect(result.goneGroupsClosed).toBe(1);
+      // Both tabs removed from tabMeta
+      expect(tabMeta[10]).toBeUndefined();
       expect(tabMeta[20]).toBeUndefined();
     });
 
@@ -1579,9 +1615,9 @@ describe('group-sorting', () => {
       expect(chrome.tabs.remove).not.toHaveBeenCalled();
     });
 
-    it('should not bookmark gone group when all tabs fail to remove but still clean up tabMeta', async () => {
-      // All tabs fail chrome.tabs.remove (already closed by Chrome) → tabMeta must
-      // still be cleaned to break the infinite re-bookmarking loop.
+    it('should bookmark gone group once and clean up tabMeta even when all tab removals fail', async () => {
+      // All tabs fail chrome.tabs.remove (already closed by Chrome) → group is
+      // bookmarked once, but tabMeta must still be cleaned to break re-bookmarking loop.
       const groups = [
         { id: 5, windowId: 1, title: 'GoneGroup', color: 'red' },
       ];
