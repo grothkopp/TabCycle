@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.1...tabcycle-v1.1.2) (2026-03-22)
+
+
+### Bug Fixes
+
+* **tabgroups:** fixed tab group closing bug ([#11](https://github.com/grothkopp/TabCycle/issues/11)) ([039da8e](https://github.com/grothkopp/TabCycle/commit/039da8e59aca4cee2fb99a8839628599e8ede32d))
+* use Unicode-aware regex to correctly handle German umlauts in group titles ([#10](https://github.com/grothkopp/TabCycle/issues/10)) ([399715d](https://github.com/grothkopp/TabCycle/commit/399715dde1ad0fcdf9455fcdf27a13eb81cad04f))
+
 ## [1.1.1](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.0...tabcycle-v1.1.1) (2026-02-24)
 
 
