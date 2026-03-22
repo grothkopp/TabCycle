@@ -1441,6 +1441,19 @@ async function performReconciliation(correlationId) {
           }
         }
 
+        // Re-apply colors to managed groups — Chrome may reset them to grey on restart
+        for (const groupType of ['yellow', 'red']) {
+          const groupId = remappedSpecialGroups[groupType];
+          if (groupId === null) continue;
+          try {
+            await chrome.tabGroups.update(groupId, { color: groupType });
+          } catch (error) {
+            logger.warn('Failed to restore managed group color after restart', {
+              groupType, groupId, error: error.message,
+            });
+          }
+        }
+
         const remappedGroupNaming = {};
         for (const [storedGroupId, namingMetadata] of Object.entries(storedGroupNaming)) {
           const numericGroupId = Number(storedGroupId);
