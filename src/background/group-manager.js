@@ -452,10 +452,17 @@ export function determineFreshestStatusInGroup(groupId, tabMeta) {
   return freshestStage;
 }
 
+/** Valid Chrome tab group colors that can be passed to chrome.tabGroups.update(). */
+const VALID_GROUP_COLORS = new Set(['blue', 'cyan', 'green', 'grey', 'orange', 'pink', 'purple', 'red', 'yellow']);
+
 /**
  * Updates a tab group's color to match its current lifecycle stage.
  */
 export async function updateGroupColorToMatchStatus(groupId, lifecycleStage) {
+  if (!VALID_GROUP_COLORS.has(lifecycleStage)) {
+    logger.debug('Skipping color update for non-color lifecycle stage', { groupId, lifecycleStage });
+    return;
+  }
   try {
     recordPendingExtensionColorChange(groupId, lifecycleStage);
     const updateResult = await chrome.tabGroups.update(groupId, { color: lifecycleStage });
@@ -690,6 +697,15 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
       if (lifecycleStage === TAB_LIFECYCLE_STAGE.GONE) goneGroupIds.push(groupId);
     }
 
+    // Even when goneConfig is not provided (non-evaluation callers like focus-refresh),
+    // exclude gone groups from sorting/coloring — "gone" is not a valid Chrome group color
+    // and these groups should not participate in zone ordering.
+    if (!goneConfig && goneGroupIds.length > 0) {
+      for (const goneGroupId of goneGroupIds) {
+        groupStatusMap.delete(goneGroupId);
+      }
+    }
+
     if (goneConfig && goneGroupIds.length > 0) {
       for (const goneGroupId of goneGroupIds) {
         if (goneConfig.bookmarkEnabled && goneConfig.bookmarkFolderId) {
@@ -711,12 +727,23 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
           (entry) => entry.groupId === goneGroupId && entry.windowId === Number(windowId) && !entry.pinned
         );
         for (const tabEntry of tabsInGoneGroup) {
+          let tabStillExists = false;
           try {
             await chrome.tabs.remove(tabEntry.tabId);
+          } catch (error) {
+            // Check whether the tab is genuinely gone or still alive but temporarily unremovable.
+            // Only preserve tabMeta for tabs that are confirmed to still exist in Chrome,
+            // otherwise stale "gone" entries cause infinite re-bookmarking loops.
+            const msg = error?.message || '';
+            const isTabGone = msg.includes('No tab with id');
+            tabStillExists = !isTabGone;
+            logger.warn('Failed to remove tab from gone group', {
+              tabId: tabEntry.tabId, groupId: goneGroupId, error: msg, tabStillExists,
+            });
+          }
+          if (!tabStillExists) {
             delete tabMeta[tabEntry.tabId];
             delete tabMeta[String(tabEntry.tabId)];
-          } catch (error) {
-            logger.warn('Failed to remove tab from gone group', { tabId: tabEntry.tabId, groupId: goneGroupId, error: error.message });
           }
         }
 

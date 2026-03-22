@@ -105,6 +105,30 @@ describe('group-sorting', () => {
       await updateGroupColorToMatchStatus(5, 'red');
       expect(chrome.tabGroups.update).toHaveBeenCalledWith(5, { color: 'red' });
     });
+
+    it('should skip chrome.tabGroups.update for "gone" lifecycle stage', async () => {
+      await updateGroupColorToMatchStatus(5, 'gone');
+      expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+    });
+
+    it('should skip chrome.tabGroups.update for undefined lifecycle stage', async () => {
+      await updateGroupColorToMatchStatus(5, undefined);
+      expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+    });
+
+    it('should skip chrome.tabGroups.update for null lifecycle stage', async () => {
+      await updateGroupColorToMatchStatus(5, null);
+      expect(chrome.tabGroups.update).not.toHaveBeenCalled();
+    });
+
+    it('should allow all valid Chrome tab group colors', async () => {
+      const validColors = ['blue', 'cyan', 'green', 'grey', 'orange', 'pink', 'purple', 'red', 'yellow'];
+      for (const color of validColors) {
+        chrome.tabGroups.update.mockClear();
+        await updateGroupColorToMatchStatus(5, color);
+        expect(chrome.tabGroups.update).toHaveBeenCalledWith(5, { color });
+      }
+    });
   });
 
   describe('closeAllTabsInGoneGroups', () => {
@@ -1469,8 +1493,9 @@ describe('group-sorting', () => {
       expect(windowState[1].groupZones[5]).toBe('green');
     });
 
-    it('should keep tab in tabMeta when chrome.tabs.remove fails for a gone group', async () => {
-      // Tab 10 closes successfully, tab 20 fails → tab 20 must stay in tabMeta
+    it('should preserve tabMeta when chrome.tabs.remove fails with a transient error', async () => {
+      // Tab 10 closes successfully, tab 20 fails with a transient error (not "No tab with id")
+      // → tab 20 stays in tabMeta so it remains managed and can be retried.
       const groups = [
         { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
       ];
@@ -1484,7 +1509,7 @@ describe('group-sorting', () => {
       chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
       chrome.tabs.remove
         .mockResolvedValueOnce(undefined)          // tab 10 succeeds
-        .mockRejectedValueOnce(new Error('Tab is uneditable'));  // tab 20 fails
+        .mockRejectedValueOnce(new Error('Tab is uneditable'));  // tab 20 fails (transient)
 
       const tabMeta = {
         10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
@@ -1501,8 +1526,44 @@ describe('group-sorting', () => {
       expect(result.goneGroupsClosed).toBe(1);
       // Tab 10 was successfully closed → removed from tabMeta
       expect(tabMeta[10]).toBeUndefined();
-      // Tab 20 failed to close → must remain in tabMeta
+      // Tab 20 failed with transient error → stays in tabMeta so it remains managed
       expect(tabMeta[20]).toBeDefined();
+    });
+
+    it('should clean up tabMeta when chrome.tabs.remove fails with "No tab with id"', async () => {
+      // Tab already gone from Chrome → "No tab with id" error → clean up tabMeta
+      // to prevent the infinite re-bookmarking loop.
+      const groups = [
+        { id: 5, windowId: 1, title: 'OldGroup', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false, url: 'https://a.com', title: 'A' },
+        { id: 20, windowId: 1, groupId: 5, pinned: false, url: 'https://b.com', title: 'B' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      chrome.tabGroups.get.mockResolvedValue({ id: 5, title: 'OldGroup', color: 'red' });
+      chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
+      chrome.tabs.remove
+        .mockResolvedValueOnce(undefined)                          // tab 10 succeeds
+        .mockRejectedValueOnce(new Error('No tab with id: 20.')); // tab 20 already gone
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
+
+      expect(result.goneGroupsClosed).toBe(1);
+      // Both tabs removed from tabMeta
+      expect(tabMeta[10]).toBeUndefined();
+      expect(tabMeta[20]).toBeUndefined();
     });
 
     it('should not bookmark gone tab when bookmarking is disabled', async () => {
@@ -1526,6 +1587,109 @@ describe('group-sorting', () => {
       expect(result.goneTabsClosed).toBe(1);
       expect(gc.bookmarkTab).not.toHaveBeenCalled();
       expect(chrome.tabs.remove).toHaveBeenCalledWith(10);
+    });
+
+    it('should not re-bookmark a gone group on subsequent cycles after tabMeta cleanup', async () => {
+      // Simulates the second evaluation cycle after a gone group was already processed.
+      // After the first cycle cleaned up tabMeta, determineFreshestStatusInGroup returns null
+      // for the empty group → it should be skipped entirely (no bookmarking, no closing).
+      const groups = [
+        { id: 5, windowId: 1, title: 'AlreadyProcessed', color: 'red' },
+      ];
+      const tabs = [];
+      mockBrowserState(tabs, groups);
+
+      // tabMeta has NO entries for group 5 (cleaned up in previous cycle)
+      const tabMeta = {};
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: {} },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
+
+      // Group 5 has no tabs in tabMeta → determineFreshestStatusInGroup returns null → skipped
+      expect(result.goneGroupsClosed).toBe(0);
+      expect(gc.bookmarkGroupTabs).not.toHaveBeenCalled();
+      expect(chrome.tabs.remove).not.toHaveBeenCalled();
+    });
+
+    it('should bookmark gone group once and clean up tabMeta even when all tab removals fail', async () => {
+      // All tabs fail chrome.tabs.remove (already closed by Chrome) → group is
+      // bookmarked once, but tabMeta must still be cleaned to break re-bookmarking loop.
+      const groups = [
+        { id: 5, windowId: 1, title: 'GoneGroup', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 5, pinned: false, url: 'https://a.com', title: 'A' },
+        { id: 20, windowId: 1, groupId: 5, pinned: false, url: 'https://b.com', title: 'B' },
+      ];
+      mockBrowserState(tabs, groups);
+
+      chrome.tabGroups.get.mockResolvedValue({ id: 5, title: 'GoneGroup', color: 'red' });
+      chrome.tabs.query.mockResolvedValueOnce(tabs).mockResolvedValueOnce(tabs);
+      chrome.tabs.remove
+        .mockRejectedValueOnce(new Error('No tab with id: 10.'))
+        .mockRejectedValueOnce(new Error('No tab with id: 20.'));
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 5: 'red' } },
+      };
+
+      const gc = makeGoneConfig();
+      const result = await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, gc);
+
+      // Group was bookmarked once
+      expect(gc.bookmarkGroupTabs).toHaveBeenCalledTimes(1);
+      expect(result.goneGroupsClosed).toBe(1);
+      // Both tabs removed from tabMeta despite chrome.tabs.remove failures
+      expect(tabMeta[10]).toBeUndefined();
+      expect(tabMeta[20]).toBeUndefined();
+      // groupZones cleaned up
+      expect(windowState[1].groupZones[5]).toBeUndefined();
+    });
+
+    it('should exclude gone groups from sorting/coloring when goneConfig is undefined', async () => {
+      // When called from non-evaluation paths (focus-refresh, debounced sort),
+      // goneConfig is undefined. Gone groups must be excluded from survivingUserGroups
+      // to avoid passing "gone" as a color to chrome.tabGroups.update.
+      const groups = [
+        { id: 1, windowId: 1, title: 'Fresh', color: 'green' },
+        { id: 5, windowId: 1, title: 'Stale', color: 'red' },
+      ];
+      const tabs = [
+        { id: 10, windowId: 1, groupId: 1, pinned: false },
+        { id: 20, windowId: 1, groupId: 5, pinned: false },
+      ];
+      mockBrowserState(tabs, groups);
+
+      const tabMeta = {
+        10: { tabId: 10, windowId: 1, groupId: 1, status: 'green', isSpecialGroup: false, pinned: false },
+        20: { tabId: 20, windowId: 1, groupId: 5, status: 'gone', isSpecialGroup: false, pinned: false },
+      };
+
+      const windowState = {
+        1: { specialGroups: { yellow: null, red: null }, groupZones: { 1: 'green', 5: 'red' } },
+      };
+
+      // Pass undefined goneConfig (like focus-refresh and debounced sort do)
+      await sortTabsAndGroupsByLifecycleZone(1, tabMeta, windowState, undefined);
+
+      // Gone group should NOT have its color updated (would fail with invalid "gone" color)
+      const colorUpdateCalls = chrome.tabGroups.update.mock.calls;
+      const goneColorCall = colorUpdateCalls.find(
+        ([groupId, props]) => groupId === 5 && props.color === 'gone'
+      );
+      expect(goneColorCall).toBeUndefined();
+
+      // Tabs in the gone group should NOT be removed (no goneConfig to handle them)
+      expect(tabMeta[20]).toBeDefined();
     });
   });
 
