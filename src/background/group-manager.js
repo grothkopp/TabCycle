@@ -855,7 +855,7 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
     if (isGroupColoringEnabled) {
       for (const group of survivingUserGroups) {
         const lifecycleStage = groupStatusMap.get(group.id);
-        if (lifecycleStage) {
+        if (lifecycleStage && group.color !== lifecycleStage) {
           await updateGroupColorToMatchStatus(group.id, lifecycleStage);
         }
       }

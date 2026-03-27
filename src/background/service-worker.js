@@ -25,8 +25,6 @@ import {
   getManagedGroupType,
   removeManagedGroupIfEmpty,
   removeTabFromItsGroup,
-  determineFreshestStatusInGroup,
-  updateGroupColorToMatchStatus,
   sortTabsAndGroupsByLifecycleZone,
   dissolveUnnamedGroupsWithOnlyOneTab,
   dissolveManagedGroupsInWindow,
@@ -65,6 +63,11 @@ let activeStartupHandlerCount = 0;
 let isBrowserStartupInProgress = false;
 let pendingReconciliationPromise = null;
 const tabsCurrentlyBeingResetByNavigation = new Set();
+
+// Cache of each group's last-seen title and color, used by the onGroupUpdated
+// handler to detect collapse/expand events (where only `collapsed` changed)
+// and skip unnecessary sort scheduling.
+const lastKnownGroupState = new Map();
 
 // ─── Debounced Sort & Title Update ───────────────────────────────────────────
 // Reactive handlers (tab move, group change, etc.) schedule a debounced sort
@@ -397,6 +400,9 @@ async function executeTabAgingEvaluation(correlationId) {
   const transitionCount = Object.keys(tabsWithChangedStatus).length;
 
   for (const [tabId, transition] of Object.entries(tabsWithChangedStatus)) {
+    // Skip tabs currently being reset by a navigation handler to avoid
+    // racing: the navigation handler will set the correct status itself.
+    if (tabsCurrentlyBeingResetByNavigation.has(Number(tabId))) continue;
     tabMeta[tabId].status = transition.newStatus;
   }
 
@@ -437,6 +443,18 @@ async function executeTabAgingEvaluation(correlationId) {
       await appendAgeToAllGroupTitles(windowId, tabMeta, windowState, currentActiveTime, settings);
     } else {
       await removeAgeSuffixFromAllGroupTitles(windowId, windowState);
+    }
+  }
+
+  // Before writing, re-read tabMeta from storage and preserve any concurrent
+  // navigation resets (identified by a more recent refreshWallTime). This
+  // prevents the evaluation cycle's stale snapshot from overwriting a tab
+  // that was just reset to green by the navigation or focus-refresh handler.
+  const freshSnapshot = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
+  const freshTabMeta = freshSnapshot[STORAGE_KEYS.TAB_META] || {};
+  for (const [tabId, freshEntry] of Object.entries(freshTabMeta)) {
+    if (tabMeta[tabId] && freshEntry.refreshWallTime > tabMeta[tabId].refreshWallTime) {
+      tabMeta[tabId] = freshEntry;
     }
   }
 
@@ -701,16 +719,6 @@ async function refreshTabAgeAfterSustainedFocus(tabId, windowId) {
     }
 
     const isAgingEnabled = settings.agingEnabled !== false;
-    const userGroupId = refreshedEntry.groupId;
-    if (isAgingEnabled && userGroupId !== null && !refreshedEntry.isSpecialGroup
-        && !isManagedAgingGroup(userGroupId, existingEntry.windowId, windowState)) {
-      if (settings.tabgroupColoringEnabled !== false) {
-        const groupStatus = determineFreshestStatusInGroup(userGroupId, tabMeta);
-        if (groupStatus) {
-          await updateGroupColorToMatchStatus(userGroupId, groupStatus);
-        }
-      }
-    }
     if (isAgingEnabled) {
       await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
     }
@@ -846,16 +854,6 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource) {
     }
 
     const isAgingEnabled = settings.agingEnabled !== false;
-    const userGroupId = refreshedEntry.groupId;
-    if (isAgingEnabled && userGroupId !== null && !refreshedEntry.isSpecialGroup
-        && !isManagedAgingGroup(userGroupId, existingEntry.windowId, windowState)) {
-      if (settings.tabgroupColoringEnabled !== false) {
-        const groupStatus = determineFreshestStatusInGroup(userGroupId, tabMeta);
-        if (groupStatus) {
-          await updateGroupColorToMatchStatus(userGroupId, groupStatus);
-        }
-      }
-    }
     if (isAgingEnabled) {
       await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
     }
@@ -1023,6 +1021,12 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
       return;
     }
 
+    // Snapshot previous state and update cache so we can detect what changed.
+    // Chrome's tabGroups.onUpdated does not provide a changeInfo — it fires for
+    // title, color, AND collapsed changes with the full group object.
+    const previousState = lastKnownGroupState.get(group.id);
+    lastKnownGroupState.set(group.id, { title: group.title, color: group.color });
+
     const wasExtensionTitleWrite = typeof group.title === 'string'
       && acknowledgeExtensionTitleChangeIfExpected(group.id, group.title);
     const wasExtensionColorWrite = typeof group.color === 'string'
@@ -1037,7 +1041,16 @@ chrome.tabGroups.onUpdated.addListener(async (group) => {
       return;
     }
 
-    if (group.title !== undefined) {
+    // If title and color are unchanged from the cached state, the event is a
+    // collapse/expand — no sorting or naming lock is needed.
+    const titleChanged = !previousState || previousState.title !== group.title;
+    const colorChanged = !previousState || previousState.color !== group.color;
+    if (!titleChanged && !colorChanged) {
+      logger.debug('Tab group collapsed/expanded, skipping sort', { groupId: group.id, windowId: group.windowId }, correlationId);
+      return;
+    }
+
+    if (titleChanged && group.title !== undefined) {
       const lockResult = lockAutoNamingAfterUserEdit(group.windowId, group, windowState, USER_EDIT_LOCK_DURATION_MS);
       await writeMultipleStateEntries({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
       logger.debug('Recorded user group title edit lock', {
