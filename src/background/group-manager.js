@@ -396,6 +396,14 @@ export async function moveTabToManagedGroup(tabId, groupType, windowId, windowSt
     logger.debug('Moved tab to special group', { tabId, type: groupType, groupId: targetGroupId });
     return { success: true, groupId: targetGroupId };
   } catch (error) {
+    const isDragLock = error?.message?.includes('cannot be edited');
+    if (isDragLock) {
+      logger.warn('Tab move blocked by drag lock, will retry next cycle', {
+        tabId, type: groupType, groupId: targetGroupId,
+      });
+      return { success: false, dragLocked: true };
+    }
+
     if (error?.message?.includes('No group with id')) {
       windowEntry.specialGroups[groupType] = null;
       const retryResult = await ensureManagedGroupExists(windowId, groupType, windowState, tabId, settings);
@@ -407,6 +415,12 @@ export async function moveTabToManagedGroup(tabId, groupType, windowId, windowSt
           logger.debug('Moved tab to recreated special group', { tabId, type: groupType, groupId: targetGroupId });
           return { success: true, groupId: targetGroupId };
         } catch (retryError) {
+          if (retryError?.message?.includes('cannot be edited')) {
+            logger.warn('Tab move blocked by drag lock, will retry next cycle', {
+              tabId, type: groupType, groupId: targetGroupId,
+            });
+            return { success: false, dragLocked: true };
+          }
           logger.error('Failed to move tab to special group', {
             tabId,
             type: groupType,
@@ -617,6 +631,7 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
 
       if (desiredZone === 'yellow') {
         const moveResult = await moveTabToManagedGroup(browserTab.id, 'yellow', windowId, windowState, settings);
+        if (moveResult.dragLocked) break;
         if (moveResult.success) {
           tabEntry.groupId = moveResult.groupId;
           tabEntry.isSpecialGroup = true;
@@ -625,6 +640,7 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
         }
       } else if (desiredZone === 'red') {
         const moveResult = await moveTabToManagedGroup(browserTab.id, 'red', windowId, windowState, settings);
+        if (moveResult.dragLocked) break;
         if (moveResult.success) {
           tabEntry.groupId = moveResult.groupId;
           tabEntry.isSpecialGroup = true;
@@ -844,6 +860,10 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
           await chrome.tabGroups.move(group.id, { index: -1 });
           sortingResults.groupsMoved++;
         } catch (error) {
+          if (error?.message?.includes('cannot be edited')) {
+            logger.warn('Group sorting blocked by drag lock, will retry next cycle', { windowId });
+            break;
+          }
           logger.warn('Failed to move group to zone', {
             groupId: group.id, zone: group._special ? 'special' : groupStatusMap.get(group.id),
             error: error.message, errorCode: ERROR_CODES.ERR_GROUP_MOVE,
