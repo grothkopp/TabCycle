@@ -890,7 +890,8 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
       desiredGroupOrder: desiredGroupIds,
     });
   } catch (error) {
-    logger.error('Failed to sort tabs and groups', {
+    const level = error?.message?.includes('No current window') ? 'warn' : 'error';
+    logger[level]('Failed to sort tabs and groups', {
       windowId,
       error: error.message,
       errorCode: ERROR_CODES.ERR_GROUP_MOVE,
@@ -947,7 +948,8 @@ export async function dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, win
       }
     }
   } catch (error) {
-    logger.error('Failed to query groups for dissolution', {
+    const level = error?.message?.includes('No current window') ? 'warn' : 'error';
+    logger[level]('Failed to query groups for dissolution', {
       windowId,
       error: error.message,
     });
