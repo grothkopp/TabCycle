@@ -1535,6 +1535,19 @@ async function performReconciliation(correlationId) {
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
     });
 
+    // Seed the group state cache so the first tabGroups.onUpdated (e.g. a
+    // collapse) can be correctly identified as a no-op instead of triggering
+    // an unnecessary sort.
+    try {
+      const allBrowserGroups = await chrome.tabGroups.query({});
+      for (const group of allBrowserGroups) {
+        lastKnownGroupState.set(group.id, { title: group.title, color: group.color });
+      }
+      logger.debug('Seeded group state cache', { groupCount: allBrowserGroups.length }, correlationId);
+    } catch (error) {
+      logger.warn('Failed to seed group state cache', { error: error.message }, correlationId);
+    }
+
     logger.info('State reconciled', {
       tabsInChrome: allBrowserTabs.length,
       tabsReconciled: Object.keys(reconciledTabMeta).length,
