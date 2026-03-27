@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.3](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.2...tabcycle-v1.1.3) (2026-03-27)
+
+
+### Bug Fixes
+
+* eliminate tab group flickering on collapse, reload, and tab activation ([#13](https://github.com/grothkopp/TabCycle/issues/13)) ([8a4bbd5](https://github.com/grothkopp/TabCycle/commit/8a4bbd50a6cc0e9a73acbaa345ca477cd27adea8))
+
 ## [1.1.2](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.1...tabcycle-v1.1.2) (2026-03-22)
 
 
