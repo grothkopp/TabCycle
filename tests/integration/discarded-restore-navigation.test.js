@@ -66,9 +66,10 @@ async function loadServiceWorker() {
     },
     windows: {
       WINDOW_ID_NONE: -1,
+      onCreated: makeEvent('windowsOnCreated'),
       onFocusChanged: makeEvent('windowsOnFocusChanged'),
       onRemoved: makeEvent('windowsOnRemoved'),
-      getAll: jest.fn(async () => []),
+      getAll: jest.fn(async () => [{ id: 1, type: 'normal' }]),
     },
     tabs: {
       onCreated: makeEvent('tabsOnCreated'),
