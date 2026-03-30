@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.3...tabcycle-v1.1.4) (2026-03-30)
+
+
+### Bug Fixes
+
+* preserve tab ages and group ordering across browser restart ([#15](https://github.com/grothkopp/TabCycle/issues/15)) ([1310d41](https://github.com/grothkopp/TabCycle/commit/1310d41d726d95b07b8ba46f566a14ce3a55a494))
+
 ## [1.1.3](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.2...tabcycle-v1.1.3) (2026-03-27)
 
 
