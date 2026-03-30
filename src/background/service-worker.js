@@ -69,6 +69,30 @@ const tabsCurrentlyBeingResetByNavigation = new Set();
 // and skip unnecessary sort scheduling.
 const lastKnownGroupState = new Map();
 
+// Cache of normal (browser) window IDs.  Tabs in non-normal windows (DevTools,
+// popups, app windows) are excluded from all tracking so they never enter
+// tabMeta.  Updated by windows.onCreated / onRemoved and seeded on startup.
+const normalWindowIds = new Set();
+
+/** Returns true if `windowId` belongs to a normal browser window.
+ *  If the cache has not been seeded yet, defaults to true to avoid
+ *  dropping tabs before startup completes. */
+function isNormalWindow(windowId) {
+  if (normalWindowIds.size === 0) return true;
+  return normalWindowIds.has(windowId);
+}
+
+/** Seed the cache from Chrome's current window list. */
+async function seedNormalWindowCache() {
+  try {
+    const allWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    normalWindowIds.clear();
+    for (const w of allWindows) normalWindowIds.add(w.id);
+  } catch (error) {
+    logger.warn('Failed to seed normal window cache', { error: error.message });
+  }
+}
+
 // ─── Debounced Sort & Title Update ───────────────────────────────────────────
 // Reactive handlers (tab move, group change, etc.) schedule a debounced sort
 // instead of immediately re-sorting, reducing lag and overlapping operations.
@@ -162,21 +186,30 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   const correlationId = logger.correlationId();
   logger.info('Extension installed/updated', { reason: details.reason }, correlationId);
 
-  let isFalseInstall = false;
+  // Suppress navigation/focus handlers during install/update reconciliation to
+  // prevent Chrome events (session restore navigations, tab loads) from racing
+  // with reconciliation and resetting preserved tab ages.
+  const needsStartupGuard = details.reason === 'update' || details.reason === 'install';
+  if (needsStartupGuard) {
+    activeStartupHandlerCount++; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
+  }
+
+  await seedNormalWindowCache();
+
+  let isFreshInstall = false;
   let storedTabCount;
   try {
     if (details.reason === 'install') {
       const existingData = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
       const existingTabMeta = existingData[STORAGE_KEYS.TAB_META];
       storedTabCount = existingTabMeta ? Object.keys(existingTabMeta).length : 0;
-      isFalseInstall = storedTabCount > 0;
 
-      if (isFalseInstall) {
-        activeStartupHandlerCount++; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
+      if (storedTabCount > 0) {
         logger.info('Existing tab data found on install — treating as reconciliation', {
           existingTabCount: storedTabCount,
         }, correlationId);
       } else {
+        isFreshInstall = true;
         const defaultSettings = {
           timeMode: AGE_CALCULATION_MODE.ACTIVE,
           thresholds: {
@@ -244,24 +277,43 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     await chrome.alarms.create(EVALUATION_ALARM_NAME, { periodInMinutes: EVALUATION_INTERVAL_MINUTES });
     logger.info('Alarm created', { name: EVALUATION_ALARM_NAME, periodMinutes: EVALUATION_INTERVAL_MINUTES }, correlationId);
 
-    if (details.reason === 'install' && isFalseInstall) {
-      await reconcileStoredStateWithBrowser(correlationId);
-    } else if (details.reason === 'install') {
+    if (isFreshInstall) {
       await scanAndTrackAllExistingTabs(correlationId);
     } else {
       await reconcileStoredStateWithBrowser(correlationId);
     }
 
     await runTabAgingEvaluationCycle(correlationId);
+    await probeAndSyncCurrentFocusState(correlationId);
   } catch (error) {
     logger.error('onInstalled handler failed', { error: error.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, correlationId);
   } finally {
-    if (isFalseInstall) {
+    if (needsStartupGuard) {
       activeStartupHandlerCount--; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
-      logger.info('Startup guard cleared (false install)', { refCount: activeStartupHandlerCount }, correlationId);
+      logger.info('Startup guard cleared (onInstalled)', { reason: details.reason, refCount: activeStartupHandlerCount }, correlationId);
     }
   }
 });
+
+/**
+ * Probes Chrome for the currently focused window and syncs the active time
+ * stopwatch.  After startup or extension reload, Chrome may not fire
+ * windows.onFocusChanged, leaving focusStartTime null and active time frozen.
+ */
+async function probeAndSyncCurrentFocusState(correlationId) {
+  try {
+    const focusedWindow = await chrome.windows.getLastFocused();
+    if (focusedWindow && focusedWindow.id !== chrome.windows.WINDOW_ID_NONE && focusedWindow.focused) {
+      await updateActiveTimeOnWindowFocusChange(focusedWindow.id);
+      await saveActiveTimeToStorage();
+      logger.info('Probed focus state and started active time stopwatch', {
+        windowId: focusedWindow.id,
+      }, correlationId);
+    }
+  } catch (error) {
+    logger.warn('Failed to probe focus state', { error: error.message }, correlationId);
+  }
+}
 
 // ─── Browser Startup ─────────────────────────────────────────────────────────
 
@@ -269,6 +321,8 @@ chrome.runtime.onStartup.addListener(async () => {
   activeStartupHandlerCount++; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
   const correlationId = logger.correlationId();
   logger.info('Browser startup detected', null, correlationId);
+
+  await seedNormalWindowCache();
 
   try {
     await recoverActiveTimeAfterRestart();
@@ -282,6 +336,12 @@ chrome.runtime.onStartup.addListener(async () => {
     await reconcileStoredStateWithBrowser(correlationId);
 
     await runTabAgingEvaluationCycle(correlationId);
+
+    // Probe Chrome for the currently focused window so the active time stopwatch
+    // starts immediately.  On browser startup (and extension reload) Chrome may
+    // not fire windows.onFocusChanged, leaving focusStartTime null and active
+    // time frozen until the user manually switches windows.
+    await probeAndSyncCurrentFocusState(correlationId);
   } catch (error) {
     logger.error('onStartup handler failed', { error: error.message, errorCode: ERROR_CODES.ERR_RECOVERY }, correlationId);
   } finally {
@@ -375,6 +435,14 @@ async function executeTabAgingEvaluation(correlationId) {
     tabCount: Object.keys(tabMeta).length,
   }, correlationId);
 
+  // Prune tabMeta entries for tabs in non-normal windows (DevTools, popups).
+  // These may have been added before the window-type filter was in place.
+  for (const [tabId, tabEntry] of Object.entries(tabMeta)) {
+    if (!isNormalWindow(tabEntry.windowId)) {
+      delete tabMeta[tabId];
+    }
+  }
+
   // Reconcile groupIds: fix stale tabMeta.groupId values by querying Chrome
   let staleGroupIdFixCount = 0;
   try {
@@ -427,7 +495,17 @@ async function executeTabAgingEvaluation(correlationId) {
   };
 
   // Per-window operations: dissolve, sort, auto-name, update titles
-  const allWindowIds = new Set(Object.values(tabMeta).map((entry) => entry.windowId));
+  // Use window IDs from live Chrome windows (queried earlier), not from tabMeta which
+  // may contain stale window IDs from closed or non-normal windows (e.g. DevTools, popups).
+  let liveNormalWindowIds;
+  try {
+    const liveWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    liveNormalWindowIds = new Set(liveWindows.map((w) => w.id));
+  } catch (error) {
+    logger.warn('Failed to query live windows, falling back to tabMeta window IDs', { error: error.message }, correlationId);
+    liveNormalWindowIds = new Set(Object.values(tabMeta).map((entry) => entry.windowId));
+  }
+  const allWindowIds = liveNormalWindowIds;
   const autoNamingConfig = resolveAutoNamingConfiguration(settings);
 
   for (const windowId of allWindowIds) {
@@ -482,8 +560,7 @@ async function executeTabAgingEvaluation(correlationId) {
 chrome.tabs.onCreated.addListener(async (tab) => {
   const correlationId = logger.correlationId();
   try {
-    if (tab.pinned) {
-      logger.debug('Skipping pinned tab creation', { tabId: tab.id }, correlationId);
+    if (tab.pinned || !isNormalWindow(tab.windowId)) {
       return;
     }
 
@@ -600,7 +677,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
         delete tabMeta[tabId];
         delete tabMeta[String(tabId)];
         logger.debug('Tab pinned, removed from tracking', { tabId }, correlationId);
-      } else {
+      } else if (isNormalWindow(tab.windowId)) {
         const currentActiveTime = await getCurrentTotalActiveTimeMs();
         tabMeta[tabId] = createFreshTabMetadata(tab, currentActiveTime);
         logger.debug('Tab unpinned, added as fresh green', { tabId }, correlationId);
@@ -665,7 +742,7 @@ async function refreshTabAgeAfterSustainedFocus(tabId, windowId) {
     let tab;
     try {
       tab = await chrome.tabs.get(tabId);
-      if (tab.pinned) return;
+      if (tab.pinned || !isNormalWindow(tab.windowId)) return;
     } catch { return; }
 
     const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
@@ -788,6 +865,7 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource) {
         logger.debug('Ignoring navigation for discarded/suspended tab', { tabId, source: eventSource }, correlationId);
         return;
       }
+      if (!isNormalWindow(tab.windowId)) return;
       navigatedToUrl = tab.url || '';
     } catch { /* tab gone */ }
 
@@ -892,9 +970,14 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
   }
 });
 
-// ─── Window Removed ──────────────────────────────────────────────────────────
+// ─── Window Created / Removed ────────────────────────────────────────────────
+
+chrome.windows.onCreated.addListener((window) => {
+  if (window.type === 'normal') normalWindowIds.add(window.id);
+});
 
 chrome.windows.onRemoved.addListener(async (windowId) => {
+  normalWindowIds.delete(windowId);
   const correlationId = logger.correlationId();
   try {
     const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
@@ -1220,7 +1303,7 @@ async function scanAndTrackAllExistingTabs(correlationId) {
     const tabMeta = {};
 
     for (const tab of allBrowserTabs) {
-      if (tab.pinned) continue;
+      if (tab.pinned || !isNormalWindow(tab.windowId)) continue;
       tabMeta[tab.id] = {
         tabId: tab.id,
         windowId: tab.windowId,
@@ -1272,14 +1355,18 @@ async function performReconciliation(correlationId) {
     const storedMatchableUrlCount = Object.values(storedTabMeta)
       .filter((entry) => isMatchableUrl(entry.url)).length;
 
+    // Only reconcile tabs in normal browser windows — DevTools, popups, and app
+    // windows are excluded from all tracking.
     let allBrowserTabs, allBrowserWindows;
     if (storedMatchableUrlCount > 0) {
       const deadline = Date.now() + 10_000;
       while (Date.now() < deadline) {
         [allBrowserTabs, allBrowserWindows] = await Promise.all([
           chrome.tabs.query({}),
-          chrome.windows.getAll(),
+          chrome.windows.getAll({ windowTypes: ['normal'] }),
         ]);
+        const normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
+        allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
         const browserTabsWithRealUrls = allBrowserTabs.filter(
           (tab) => !tab.pinned && isMatchableUrl(tab.url),
         ).length;
@@ -1289,8 +1376,10 @@ async function performReconciliation(correlationId) {
     } else {
       [allBrowserTabs, allBrowserWindows] = await Promise.all([
         chrome.tabs.query({}),
-        chrome.windows.getAll(),
+        chrome.windows.getAll({ windowTypes: ['normal'] }),
       ]);
+      const normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
+      allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
     }
 
     const currentActiveTime = await getCurrentTotalActiveTimeMs();
@@ -1327,7 +1416,12 @@ async function performReconciliation(correlationId) {
         matchedEntry.windowId = browserTab.windowId;
         matchedEntry.groupId = liveGroupId;
         matchedEntry.pinned = browserTab.pinned;
-        matchedEntry.url = browserTab.url || matchedEntry.url || '';
+        // Prefer the browser's URL, but don't overwrite a meaningful stored URL
+        // with a generic placeholder — during session restore, Chrome may report
+        // chrome://newtab/ for tabs that haven't loaded their real URL yet.
+        const browserUrl = browserTab.url || '';
+        const isGenericUrl = !browserUrl || browserUrl === 'chrome://newtab/' || browserUrl === 'about:blank';
+        matchedEntry.url = isGenericUrl && matchedEntry.url ? matchedEntry.url : (browserUrl || matchedEntry.url || '');
         reconciledTabMeta[browserTab.id] = matchedEntry;
         alreadyMatchedEntries.add(matchedEntry);
       } else {
@@ -1454,6 +1548,15 @@ async function performReconciliation(correlationId) {
           }
         }
 
+        const remappedGroupZones = {};
+        for (const [storedGroupId, zone] of Object.entries(storedGroupZones)) {
+          const numericGroupId = Number(storedGroupId);
+          const resolvedGroupId = liveGroupIds.has(numericGroupId) ? numericGroupId : (resolvedGroupIdMap.get(numericGroupId) ?? null);
+          if (resolvedGroupId !== null && liveGroupIds.has(resolvedGroupId)) {
+            remappedGroupZones[resolvedGroupId] = zone;
+          }
+        }
+
         const remappedGroupNaming = {};
         for (const [storedGroupId, namingMetadata] of Object.entries(storedGroupNaming)) {
           const numericGroupId = Number(storedGroupId);
@@ -1483,7 +1586,7 @@ async function performReconciliation(correlationId) {
 
         reconciledWindowState[resolvedWindowId] = {
           specialGroups: remappedSpecialGroups,
-          groupZones: storedGroupZones,
+          groupZones: remappedGroupZones,
           groupNaming: remappedGroupNaming,
         };
       }
