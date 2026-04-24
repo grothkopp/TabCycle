@@ -77,6 +77,7 @@ const lastKnownGroupState = new Map();
 const normalWindowIds = new Set();
 const deferredStartupTabMetaById = new Map();
 const STARTUP_RECONCILIATION_RETRY_DELAY_MS = 500;
+let trackedStateMutationTail = Promise.resolve();
 
 function isStartupStatePending() {
   return isBrowserStartupInProgress || startupReconciliationPending;
@@ -89,6 +90,310 @@ function scheduleStartupReconciliationRetry(trigger) {
     startupReconciliationRetryTimer = null;
     void retryPendingStartupReconciliation(trigger);
   }, STARTUP_RECONCILIATION_RETRY_DELAY_MS);
+}
+
+function ensureRuntimeWindowStateEntry(windowId, windowState) {
+  const normalizedWindowId = Number(windowId);
+  if (!windowState[normalizedWindowId] || typeof windowState[normalizedWindowId] !== 'object') {
+    windowState[normalizedWindowId] = {
+      specialGroups: { yellow: null, red: null },
+      groupZones: {},
+      groupNaming: {},
+    };
+  }
+  if (!windowState[normalizedWindowId].specialGroups || typeof windowState[normalizedWindowId].specialGroups !== 'object') {
+    windowState[normalizedWindowId].specialGroups = { yellow: null, red: null };
+  }
+  if (windowState[normalizedWindowId].specialGroups.yellow === undefined) {
+    windowState[normalizedWindowId].specialGroups.yellow = null;
+  }
+  if (windowState[normalizedWindowId].specialGroups.red === undefined) {
+    windowState[normalizedWindowId].specialGroups.red = null;
+  }
+  if (!windowState[normalizedWindowId].groupZones || typeof windowState[normalizedWindowId].groupZones !== 'object') {
+    windowState[normalizedWindowId].groupZones = {};
+  }
+  if (!windowState[normalizedWindowId].groupNaming || typeof windowState[normalizedWindowId].groupNaming !== 'object') {
+    windowState[normalizedWindowId].groupNaming = {};
+  }
+  return windowState[normalizedWindowId];
+}
+
+function pickFresherTrackedEntry(candidate, currentBest) {
+  if (!candidate) return currentBest;
+  if (!currentBest) return candidate;
+  if (candidate.refreshActiveTime > currentBest.refreshActiveTime) return candidate;
+  if (candidate.refreshActiveTime < currentBest.refreshActiveTime) return currentBest;
+  if (candidate.refreshWallTime > currentBest.refreshWallTime) return candidate;
+  return currentBest;
+}
+
+function inferTrackedStatusFromGroup(windowId, groupId, windowState) {
+  if (groupId === null || groupId === undefined) return null;
+  const windowEntry = windowState[windowId] || windowState[String(windowId)];
+  if (!windowEntry) return null;
+  if (windowEntry.specialGroups?.yellow === groupId) return TAB_LIFECYCLE_STAGE.YELLOW;
+  if (windowEntry.specialGroups?.red === groupId) return TAB_LIFECYCLE_STAGE.RED;
+  const inferredStatus = windowEntry.groupZones?.[groupId] ?? windowEntry.groupZones?.[String(groupId)] ?? null;
+  if (inferredStatus === TAB_LIFECYCLE_STAGE.GREEN
+    || inferredStatus === TAB_LIFECYCLE_STAGE.YELLOW
+    || inferredStatus === TAB_LIFECYCLE_STAGE.RED
+    || inferredStatus === TAB_LIFECYCLE_STAGE.GONE) {
+    return inferredStatus;
+  }
+  return null;
+}
+
+function createRecoveredTabMetadata(liveTab, tabMeta, windowState, currentActiveTime, settings) {
+  const recoveredEntry = createFreshTabMetadata(liveTab, currentActiveTime);
+  const actualGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null;
+  recoveredEntry.groupId = actualGroupId;
+  recoveredEntry.url = liveTab.url || recoveredEntry.url || '';
+
+  let freshestPeer = null;
+  if (actualGroupId !== null) {
+    for (const peerEntry of Object.values(tabMeta)) {
+      if (!peerEntry || peerEntry.pinned) continue;
+      if (Number(peerEntry.windowId) !== Number(liveTab.windowId)) continue;
+      if (peerEntry.groupId !== actualGroupId) continue;
+      freshestPeer = pickFresherTrackedEntry(peerEntry, freshestPeer);
+    }
+  }
+
+  if (freshestPeer) {
+    recoveredEntry.refreshActiveTime = freshestPeer.refreshActiveTime;
+    recoveredEntry.refreshWallTime = freshestPeer.refreshWallTime;
+    recoveredEntry.status = freshestPeer.status;
+    recoveredEntry.isSpecialGroup = freshestPeer.isSpecialGroup === true;
+    recoveredEntry.managedGroupType = freshestPeer.managedGroupType ?? null;
+  } else {
+    const inferredStatus = inferTrackedStatusFromGroup(liveTab.windowId, actualGroupId, windowState);
+    if (inferredStatus === TAB_LIFECYCLE_STAGE.YELLOW
+      || inferredStatus === TAB_LIFECYCLE_STAGE.RED
+      || inferredStatus === TAB_LIFECYCLE_STAGE.GONE) {
+      const thresholdMs = inferredStatus === TAB_LIFECYCLE_STAGE.YELLOW
+        ? settings?.thresholds?.greenToYellow ?? DEFAULT_AGING_THRESHOLDS.GREEN_TO_YELLOW
+        : inferredStatus === TAB_LIFECYCLE_STAGE.RED
+          ? settings?.thresholds?.yellowToRed ?? DEFAULT_AGING_THRESHOLDS.YELLOW_TO_RED
+          : settings?.thresholds?.redToGone ?? DEFAULT_AGING_THRESHOLDS.RED_TO_GONE;
+      recoveredEntry.refreshActiveTime = Math.max(0, currentActiveTime - thresholdMs);
+      recoveredEntry.refreshWallTime = Math.max(0, Date.now() - thresholdMs);
+      recoveredEntry.status = inferredStatus;
+    }
+  }
+
+  const windowEntry = windowState[liveTab.windowId] || windowState[String(liveTab.windowId)];
+  if (actualGroupId !== null && windowEntry?.specialGroups) {
+    if (windowEntry.specialGroups.yellow === actualGroupId) {
+      recoveredEntry.isSpecialGroup = true;
+      recoveredEntry.managedGroupType = MANAGED_GROUP_TYPES.YELLOW;
+      if (recoveredEntry.status === TAB_LIFECYCLE_STAGE.GREEN) {
+        recoveredEntry.status = TAB_LIFECYCLE_STAGE.YELLOW;
+      }
+    }
+    if (windowEntry.specialGroups.red === actualGroupId) {
+      recoveredEntry.isSpecialGroup = true;
+      recoveredEntry.managedGroupType = MANAGED_GROUP_TYPES.RED;
+      if (recoveredEntry.status === TAB_LIFECYCLE_STAGE.GREEN || recoveredEntry.status === TAB_LIFECYCLE_STAGE.YELLOW) {
+        recoveredEntry.status = TAB_LIFECYCLE_STAGE.RED;
+      }
+    }
+  }
+
+  return recoveredEntry;
+}
+
+function chooseManagedGroupId(existingGroupId, candidateCounts, liveGroupIds) {
+  if (existingGroupId !== null && existingGroupId !== undefined && liveGroupIds.has(existingGroupId)) {
+    return existingGroupId;
+  }
+  let chosenGroupId = null;
+  let chosenCount = -1;
+  for (const [groupId, count] of candidateCounts.entries()) {
+    if (!liveGroupIds.has(groupId)) continue;
+    if (count > chosenCount) {
+      chosenGroupId = groupId;
+      chosenCount = count;
+    }
+  }
+  return chosenGroupId;
+}
+
+async function mutateTrackedState(storageKeys, mutator) {
+  const mutationPromise = trackedStateMutationTail.catch(() => undefined).then(async () => {
+    const storedState = await readValidatedStateFromStorage(storageKeys);
+    const writes = await mutator(storedState);
+    if (writes && Object.keys(writes).length > 0) {
+      await writeMultipleStateEntries(writes);
+    }
+    return writes;
+  });
+  trackedStateMutationTail = mutationPromise.then(() => undefined, () => undefined);
+  return mutationPromise;
+}
+
+async function synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, targetWindowId = null, pruneMissingTabs = targetWindowId === null, settings = {}) {
+  try {
+    const normalWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+    const liveNormalWindowIds = new Set(normalWindows.map((window) => window.id));
+    const normalizedTargetWindowId = targetWindowId !== null ? Number(targetWindowId) : null;
+    const scopedWindowIds = normalizedTargetWindowId !== null
+      ? new Set(liveNormalWindowIds.has(normalizedTargetWindowId) ? [normalizedTargetWindowId] : [])
+      : liveNormalWindowIds;
+
+    if (scopedWindowIds.size === 0) {
+      return { adoptedTabs: 0, prunedTabs: 0, repairedSpecialGroups: 0 };
+    }
+
+    let liveBrowserTabs = [];
+    let liveBrowserGroups = [];
+    if (normalizedTargetWindowId !== null) {
+      [liveBrowserTabs, liveBrowserGroups] = await Promise.all([
+        chrome.tabs.query({ windowId: normalizedTargetWindowId }),
+        chrome.tabGroups.query({ windowId: normalizedTargetWindowId }),
+      ]);
+    } else {
+      [liveBrowserTabs, liveBrowserGroups] = await Promise.all([
+        chrome.tabs.query({}),
+        chrome.tabGroups.query({}),
+      ]);
+      liveBrowserTabs = liveBrowserTabs.filter((tab) => liveNormalWindowIds.has(tab.windowId));
+      liveBrowserGroups = liveBrowserGroups.filter((group) => liveNormalWindowIds.has(group.windowId));
+    }
+
+    const liveTrackableTabs = liveBrowserTabs.filter((tab) => scopedWindowIds.has(tab.windowId) && !tab.pinned);
+    const liveTabIds = new Set(liveTrackableTabs.map((tab) => tab.id));
+    const liveGroupIdsByWindow = new Map();
+    for (const group of liveBrowserGroups) {
+      if (!scopedWindowIds.has(group.windowId)) continue;
+      const existingSet = liveGroupIdsByWindow.get(group.windowId) || new Set();
+      existingSet.add(group.id);
+      liveGroupIdsByWindow.set(group.windowId, existingSet);
+    }
+
+    let prunedTabs = 0;
+    if (pruneMissingTabs) {
+      for (const [tabIdKey, tabEntry] of Object.entries(tabMeta)) {
+        const entryWindowId = Number(tabEntry.windowId);
+        if (!scopedWindowIds.has(entryWindowId)) continue;
+        const numericTabId = Number(tabIdKey);
+        if (!liveTabIds.has(numericTabId)) {
+          delete tabMeta[tabIdKey];
+          prunedTabs++;
+        }
+      }
+    }
+
+    let adoptedTabs = 0;
+    for (const liveTab of liveTrackableTabs) {
+      const actualGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null;
+      let tabEntry = tabMeta[liveTab.id] || tabMeta[String(liveTab.id)];
+      if (!tabEntry) {
+        tabEntry = createRecoveredTabMetadata(liveTab, tabMeta, windowState, currentActiveTime, settings);
+        tabMeta[liveTab.id] = tabEntry;
+        adoptedTabs++;
+      }
+      tabEntry.tabId = liveTab.id;
+      tabEntry.windowId = liveTab.windowId;
+      tabEntry.groupId = actualGroupId;
+      tabEntry.pinned = false;
+      tabEntry.url = liveTab.url || tabEntry.url || '';
+      if (tabEntry.managedGroupType !== MANAGED_GROUP_TYPES.YELLOW && tabEntry.managedGroupType !== MANAGED_GROUP_TYPES.RED) {
+        tabEntry.managedGroupType = null;
+      }
+      if (actualGroupId === null) {
+        tabEntry.isSpecialGroup = false;
+        tabEntry.managedGroupType = null;
+      }
+    }
+
+    if (normalizedTargetWindowId === null) {
+      for (const windowIdKey of Object.keys(windowState)) {
+        if (!liveNormalWindowIds.has(Number(windowIdKey))) {
+          delete windowState[windowIdKey];
+        }
+      }
+    }
+
+    let repairedSpecialGroups = 0;
+    for (const windowId of scopedWindowIds) {
+      const windowEntry = ensureRuntimeWindowStateEntry(windowId, windowState);
+      const liveGroupIds = liveGroupIdsByWindow.get(windowId) || new Set();
+      const candidateCounts = {
+        yellow: new Map(),
+        red: new Map(),
+      };
+
+      for (const liveTab of liveTrackableTabs) {
+        if (liveTab.windowId !== windowId) continue;
+        const actualGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null;
+        if (actualGroupId === null) continue;
+        const tabEntry = tabMeta[liveTab.id] || tabMeta[String(liveTab.id)];
+        if (!tabEntry) continue;
+        const managedGroupType = tabEntry.managedGroupType
+          || (windowEntry.specialGroups.yellow === actualGroupId ? MANAGED_GROUP_TYPES.YELLOW : null)
+          || (windowEntry.specialGroups.red === actualGroupId ? MANAGED_GROUP_TYPES.RED : null);
+        if (!managedGroupType) continue;
+        const existingCount = candidateCounts[managedGroupType].get(actualGroupId) || 0;
+        candidateCounts[managedGroupType].set(actualGroupId, existingCount + 1);
+      }
+
+      for (const groupType of [MANAGED_GROUP_TYPES.YELLOW, MANAGED_GROUP_TYPES.RED]) {
+        const previousGroupId = windowEntry.specialGroups[groupType];
+        const nextGroupId = chooseManagedGroupId(previousGroupId, candidateCounts[groupType], liveGroupIds);
+        if (previousGroupId !== nextGroupId) repairedSpecialGroups++;
+        windowEntry.specialGroups[groupType] = nextGroupId;
+      }
+
+      for (const groupIdKey of Object.keys(windowEntry.groupZones)) {
+        if (!liveGroupIds.has(Number(groupIdKey))) {
+          delete windowEntry.groupZones[groupIdKey];
+        }
+      }
+      for (const groupIdKey of Object.keys(windowEntry.groupNaming)) {
+        if (!liveGroupIds.has(Number(groupIdKey))) {
+          delete windowEntry.groupNaming[groupIdKey];
+        }
+      }
+    }
+
+    for (const liveTab of liveTrackableTabs) {
+      const tabEntry = tabMeta[liveTab.id] || tabMeta[String(liveTab.id)];
+      if (!tabEntry) continue;
+      const liveGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null;
+      if (liveGroupId === null) {
+        tabEntry.isSpecialGroup = false;
+        tabEntry.managedGroupType = null;
+        continue;
+      }
+      const windowEntry = ensureRuntimeWindowStateEntry(liveTab.windowId, windowState);
+      const isYellowSpecialGroup = windowEntry.specialGroups.yellow === liveGroupId;
+      const isRedSpecialGroup = windowEntry.specialGroups.red === liveGroupId;
+      tabEntry.isSpecialGroup = isYellowSpecialGroup || isRedSpecialGroup;
+      tabEntry.managedGroupType = isYellowSpecialGroup
+        ? MANAGED_GROUP_TYPES.YELLOW
+        : isRedSpecialGroup
+          ? MANAGED_GROUP_TYPES.RED
+          : null;
+    }
+
+    if (adoptedTabs > 0 || prunedTabs > 0 || repairedSpecialGroups > 0) {
+      logger.info('Synchronized tracked state with live browser state', {
+        windowId: normalizedTargetWindowId,
+        adoptedTabs,
+        prunedTabs,
+        repairedSpecialGroups,
+      }, correlationId);
+    }
+
+    return { adoptedTabs, prunedTabs, repairedSpecialGroups };
+  } catch (error) {
+    logger.warn('Failed to synchronize tracked state with browser', {
+      windowId: targetWindowId,
+      error: error.message,
+    }, correlationId);
+    return { adoptedTabs: 0, prunedTabs: 0, repairedSpecialGroups: 0 };
+  }
 }
 
 /** Returns true if `windowId` belongs to a normal browser window.
@@ -144,50 +449,36 @@ async function executeSortAndUpdateForWindow(windowId) {
   isSortUpdateInProgress = true;
   const correlationId = logger.correlationId();
   try {
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
-
-    // Reconcile groupIds for this window before sorting
-    try {
-      const browserTabs = await chrome.tabs.query({ windowId: Number(windowId) });
-      for (const browserTab of browserTabs) {
-        const tabEntry = tabMeta[browserTab.id] || tabMeta[String(browserTab.id)];
-        if (!tabEntry) continue;
-        const actualGroupId = browserTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? browserTab.groupId : null;
-        if (tabEntry.groupId !== actualGroupId) {
-          tabEntry.groupId = actualGroupId;
-          tabEntry.isSpecialGroup = actualGroupId !== null && isManagedAgingGroup(actualGroupId, Number(windowId), windowState);
-        }
-      }
-    } catch (error) {
-      logger.warn('Sort-update: failed to reconcile groupIds', { windowId, error: error.message }, correlationId);
-    }
-
-    await dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, windowState);
-
-    const isAgingEnabled = settings.agingEnabled !== false;
-    if (isAgingEnabled) {
-      await sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, windowState, undefined, settings);
-    }
-
-    const autoNamingConfig = resolveAutoNamingConfiguration(settings);
-    await autoNameUnnamedGroupsWhenReady(windowId, tabMeta, windowState, autoNamingConfig);
-
-    const shouldShowGroupAge = isAgingEnabled && (typeof settings.showGroupAge === 'boolean'
-      ? settings.showGroupAge
-      : DEFAULT_SHOW_AGE_IN_GROUP_TITLES);
-    if (shouldShowGroupAge) {
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
       const currentActiveTime = await getCurrentTotalActiveTimeMs();
-      await appendAgeToAllGroupTitles(windowId, tabMeta, windowState, currentActiveTime, settings);
-    } else {
-      await removeAgeSuffixFromAllGroupTitles(windowId, windowState);
-    }
 
-    await writeMultipleStateEntries({
-      [STORAGE_KEYS.TAB_META]: tabMeta,
-      [STORAGE_KEYS.WINDOW_STATE]: windowState,
+      await synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, Number(windowId), true, settings);
+      await dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, windowState);
+
+      const isAgingEnabled = settings.agingEnabled !== false;
+      if (isAgingEnabled) {
+        await sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, windowState, undefined, settings);
+      }
+
+      const autoNamingConfig = resolveAutoNamingConfiguration(settings);
+      await autoNameUnnamedGroupsWhenReady(windowId, tabMeta, windowState, autoNamingConfig);
+
+      const shouldShowGroupAge = isAgingEnabled && (typeof settings.showGroupAge === 'boolean'
+        ? settings.showGroupAge
+        : DEFAULT_SHOW_AGE_IN_GROUP_TITLES);
+      if (shouldShowGroupAge) {
+        await appendAgeToAllGroupTitles(windowId, tabMeta, windowState, currentActiveTime, settings);
+      } else {
+        await removeAgeSuffixFromAllGroupTitles(windowId, windowState);
+      }
+
+      return {
+        [STORAGE_KEYS.TAB_META]: tabMeta,
+        [STORAGE_KEYS.WINDOW_STATE]: windowState,
+      };
     });
     logger.debug('Debounced sort+update complete', { windowId }, correlationId);
   } catch (error) {
@@ -409,10 +700,42 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
 // Exposed on globalThis for E2E test harness (CDP) to call directly.
 self.__runEvaluationCycle = runTabAgingEvaluationCycle;
+self.__resetTabAgeOnUserNavigation = resetTabAgeOnUserNavigation;
+ self.__resetServiceWorkerDebugState = () => {
+  isEvaluationCycleInProgress = false;
+  evaluationCycleStartTimestamp = 0;
+  isSortUpdateInProgress = false;
+  isTabPlacementInProgress = false;
+  isBrowserStartupInProgress = false;
+  activeStartupHandlerCount = 0;
+  startupReconciliationPending = false;
+  pendingReconciliationPromise = null;
+  trackedStateMutationTail = Promise.resolve();
+  deferredStartupTabMetaById.clear();
+  tabsCurrentlyBeingResetByNavigation.clear();
+  lastNavigationTimestampByTab.clear();
+  tabRestoredFromDiscardTimestamp.clear();
+  lastKnownGroupState.clear();
+  normalWindowIds.clear();
+  if (startupReconciliationRetryTimer) {
+    clearTimeout(startupReconciliationRetryTimer);
+    startupReconciliationRetryTimer = null;
+  }
+  for (const timer of pendingSortTimersByWindow.values()) {
+    clearTimeout(timer);
+  }
+  pendingSortTimersByWindow.clear();
+  if (pendingFocusRefreshTimer !== null) {
+    clearTimeout(pendingFocusRefreshTimer);
+    pendingFocusRefreshTimer = null;
+  }
+ };
 Object.defineProperty(self, '__evaluationCycleRunning', {
+  configurable: true,
   get() { return isEvaluationCycleInProgress; },
 });
 Object.defineProperty(self, '__sortUpdateRunning', {
+  configurable: true,
   get() { return isSortUpdateInProgress; },
 });
 
@@ -438,11 +761,11 @@ async function runTabAgingEvaluationCycle(correlationId) {
   }
 }
 
-/**
- * The inner evaluation cycle logic. Evaluates all tab ages, applies status
- * transitions, sorts tabs/groups, handles gone tabs, and updates titles.
- */
-async function executeTabAgingEvaluation(correlationId) {
+ /**
+  * The inner evaluation cycle logic. Evaluates all tab ages, applies status
+  * transitions, sorts tabs/groups, handles gone tabs, and updates titles.
+  */
+ async function executeTabAgingEvaluation(correlationId) {
   if (startupReconciliationPending) {
     logger.info('Startup reconciliation pending, skipping evaluation cycle', null, correlationId);
     return;
@@ -450,159 +773,120 @@ async function executeTabAgingEvaluation(correlationId) {
 
   await saveActiveTimeToStorage();
 
-  const storedState = await readValidatedStateFromStorage([
+  await mutateTrackedState([
     STORAGE_KEYS.SETTINGS,
     STORAGE_KEYS.TAB_META,
     STORAGE_KEYS.WINDOW_STATE,
-  ]);
+  ], async (storedState) => {
+    const settings = storedState[STORAGE_KEYS.SETTINGS];
+    if (!settings) {
+      logger.error('Settings missing from storage, skipping evaluation cycle. Reinstall extension or check storage.', {}, correlationId);
+      return {};
+    }
 
-  const settings = storedState[STORAGE_KEYS.SETTINGS];
-  if (!settings) {
-    logger.error('Settings missing from storage, skipping evaluation cycle. Reinstall extension or check storage.', {}, correlationId);
-    return;
-  }
-  const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-  const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-  const currentActiveTime = await getCurrentTotalActiveTimeMs();
+    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+    const currentActiveTime = await getCurrentTotalActiveTimeMs();
 
-  const isAgingEnabled = settings.agingEnabled !== false;
-  if (!isAgingEnabled) {
-    logger.debug('Aging disabled, skipping evaluation cycle', {
+    const isAgingEnabled = settings.agingEnabled !== false;
+    if (!isAgingEnabled) {
+      logger.debug('Aging disabled, skipping evaluation cycle', {
+        tabCount: Object.keys(tabMeta).length,
+      }, correlationId);
+      return {};
+    }
+
+    const activeTimeState = await getActiveTimeSnapshot();
+    logger.info('Evaluation cycle start', {
+      timeMode: settings.timeMode,
+      currentActiveTimeMs: currentActiveTime,
+      accumulatedMs: activeTimeState.accumulatedMs,
+      focusStartTime: activeTimeState.focusStartTime,
+      thresholds: settings.thresholds,
       tabCount: Object.keys(tabMeta).length,
     }, correlationId);
-    return;
-  }
 
-  const activeTimeState = await getActiveTimeSnapshot();
-  logger.info('Evaluation cycle start', {
-    timeMode: settings.timeMode,
-    currentActiveTimeMs: currentActiveTime,
-    accumulatedMs: activeTimeState.accumulatedMs,
-    focusStartTime: activeTimeState.focusStartTime,
-    thresholds: settings.thresholds,
-    tabCount: Object.keys(tabMeta).length,
-  }, correlationId);
-
-  // Prune tabMeta entries for tabs in non-normal windows (DevTools, popups).
-  // These may have been added before the window-type filter was in place.
-  for (const [tabId, tabEntry] of Object.entries(tabMeta)) {
-    if (!isNormalWindow(tabEntry.windowId)) {
-      delete tabMeta[tabId];
-    }
-  }
-
-  // Reconcile groupIds: fix stale tabMeta.groupId values by querying Chrome
-  let staleGroupIdFixCount = 0;
-  try {
-    const allBrowserTabs = await chrome.tabs.query({});
-    for (const browserTab of allBrowserTabs) {
-      const tabEntry = tabMeta[browserTab.id] || tabMeta[String(browserTab.id)];
-      if (!tabEntry) continue;
-      const actualGroupId = browserTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? browserTab.groupId : null;
-      if (tabEntry.groupId !== actualGroupId) {
-        tabEntry.groupId = actualGroupId;
-        tabEntry.isSpecialGroup = actualGroupId !== null && isManagedAgingGroup(actualGroupId, browserTab.windowId, windowState);
-        staleGroupIdFixCount++;
+    for (const [tabId, tabEntry] of Object.entries(tabMeta)) {
+      if (!isNormalWindow(tabEntry.windowId)) {
+        delete tabMeta[tabId];
       }
-      if (browserTab.url && browserTab.url !== tabEntry.url) tabEntry.url = browserTab.url;
     }
-    if (staleGroupIdFixCount > 0) {
-      logger.info('Reconciled stale groupIds in tabMeta', { fixes: staleGroupIdFixCount }, correlationId);
+
+    await synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, null, true, settings);
+
+    const tabsWithChangedStatus = findAllTabsNeedingStatusTransition(tabMeta, currentActiveTime, settings);
+    const transitionCount = Object.keys(tabsWithChangedStatus).length;
+
+    for (const [tabId, transition] of Object.entries(tabsWithChangedStatus)) {
+      if (tabsCurrentlyBeingResetByNavigation.has(Number(tabId))) continue;
+      tabMeta[tabId].status = transition.newStatus;
     }
-  } catch (error) {
-    logger.warn('Failed to reconcile groupIds', { error: error.message }, correlationId);
-  }
 
-  const tabsWithChangedStatus = findAllTabsNeedingStatusTransition(tabMeta, currentActiveTime, settings);
-  const transitionCount = Object.keys(tabsWithChangedStatus).length;
+    const isBookmarkEnabled = typeof settings.bookmarkEnabled === 'boolean'
+      ? settings.bookmarkEnabled
+      : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
+    let bookmarkFolderId = null;
 
-  for (const [tabId, transition] of Object.entries(tabsWithChangedStatus)) {
-    // Skip tabs currently being reset by a navigation handler to avoid
-    // racing: the navigation handler will set the correct status itself.
-    if (tabsCurrentlyBeingResetByNavigation.has(Number(tabId))) continue;
-    tabMeta[tabId].status = transition.newStatus;
-  }
+    const hasAnyGoneTabs = Object.values(tabMeta).some((entry) => entry.status === TAB_LIFECYCLE_STAGE.GONE);
+    if (isBookmarkEnabled && hasAnyGoneTabs) {
+      bookmarkFolderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
+      logger.debug('Bookmark folder resolved for gone handling', { bookmarkFolderId, bookmarkEnabled: isBookmarkEnabled }, correlationId);
+    }
 
-  // Build configuration for handling gone tabs (bookmarking before closing)
-  const isBookmarkEnabled = typeof settings.bookmarkEnabled === 'boolean'
-    ? settings.bookmarkEnabled
-    : DEFAULT_BOOKMARK_SETTINGS.BOOKMARK_ENABLED;
-  let bookmarkFolderId = null;
+    const goneHandlingConfig = {
+      bookmarkEnabled: isBookmarkEnabled,
+      bookmarkFolderId,
+      bookmarkTab: createBookmarkForSingleTab,
+      bookmarkGroupTabs: createBookmarkSubfolderForTabGroup,
+      isBookmarkableUrl: isUrlWorthBookmarking,
+    };
 
-  const hasAnyGoneTabs = Object.values(tabMeta).some((entry) => entry.status === TAB_LIFECYCLE_STAGE.GONE);
-  if (isBookmarkEnabled && hasAnyGoneTabs) {
-    bookmarkFolderId = await findOrCreateBookmarkFolderForClosedTabs(settings);
-    logger.debug('Bookmark folder resolved for gone handling', { bookmarkFolderId, bookmarkEnabled: isBookmarkEnabled }, correlationId);
-  }
+    let liveNormalWindowIds;
+    try {
+      const liveWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+      liveNormalWindowIds = new Set(liveWindows.map((w) => w.id));
+    } catch (error) {
+      logger.warn('Failed to query live windows, falling back to tabMeta window IDs', { error: error.message }, correlationId);
+      liveNormalWindowIds = new Set(Object.values(tabMeta).map((entry) => entry.windowId));
+    }
+    const allWindowIds = liveNormalWindowIds;
+    const autoNamingConfig = resolveAutoNamingConfiguration(settings);
 
-  const goneHandlingConfig = {
-    bookmarkEnabled: isBookmarkEnabled,
-    bookmarkFolderId,
-    bookmarkTab: createBookmarkForSingleTab,
-    bookmarkGroupTabs: createBookmarkSubfolderForTabGroup,
-    isBookmarkableUrl: isUrlWorthBookmarking,
-  };
+    for (const windowId of allWindowIds) {
+      await dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, windowState);
+      await sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, windowState, goneHandlingConfig, settings);
+      await autoNameUnnamedGroupsWhenReady(windowId, tabMeta, windowState, autoNamingConfig);
 
-  // Per-window operations: dissolve, sort, auto-name, update titles
-  // Use window IDs from live Chrome windows (queried earlier), not from tabMeta which
-  // may contain stale window IDs from closed or non-normal windows (e.g. DevTools, popups).
-  let liveNormalWindowIds;
-  try {
-    const liveWindows = await chrome.windows.getAll({ windowTypes: ['normal'] });
-    liveNormalWindowIds = new Set(liveWindows.map((w) => w.id));
-  } catch (error) {
-    logger.warn('Failed to query live windows, falling back to tabMeta window IDs', { error: error.message }, correlationId);
-    liveNormalWindowIds = new Set(Object.values(tabMeta).map((entry) => entry.windowId));
-  }
-  const allWindowIds = liveNormalWindowIds;
-  const autoNamingConfig = resolveAutoNamingConfiguration(settings);
+      const shouldShowGroupAge = typeof settings.showGroupAge === 'boolean'
+        ? settings.showGroupAge
+        : DEFAULT_SHOW_AGE_IN_GROUP_TITLES;
+      logger.debug('showGroupAge resolved', { showGroupAge: shouldShowGroupAge, settingsValue: settings.showGroupAge, default: DEFAULT_SHOW_AGE_IN_GROUP_TITLES });
+      if (shouldShowGroupAge) {
+        await appendAgeToAllGroupTitles(windowId, tabMeta, windowState, currentActiveTime, settings);
+      } else {
+        await removeAgeSuffixFromAllGroupTitles(windowId, windowState);
+      }
+    }
 
-  for (const windowId of allWindowIds) {
-    await dissolveUnnamedGroupsWithOnlyOneTab(windowId, tabMeta, windowState);
-    await sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, windowState, goneHandlingConfig, settings);
-    await autoNameUnnamedGroupsWhenReady(windowId, tabMeta, windowState, autoNamingConfig);
-
-    const shouldShowGroupAge = typeof settings.showGroupAge === 'boolean'
-      ? settings.showGroupAge
-      : DEFAULT_SHOW_AGE_IN_GROUP_TITLES;
-    logger.debug('showGroupAge resolved', { showGroupAge: shouldShowGroupAge, settingsValue: settings.showGroupAge, default: DEFAULT_SHOW_AGE_IN_GROUP_TITLES });
-    if (shouldShowGroupAge) {
-      await appendAgeToAllGroupTitles(windowId, tabMeta, windowState, currentActiveTime, settings);
+    if (transitionCount > 0) {
+      logger.info('Evaluation cycle complete with transitions', {
+        tabCount: Object.keys(tabMeta).length,
+        transitions: transitionCount,
+        currentActiveTimeMs: currentActiveTime,
+      }, correlationId);
     } else {
-      await removeAgeSuffixFromAllGroupTitles(windowId, windowState);
+      logger.debug('Evaluation cycle complete, no transitions', {
+        tabCount: Object.keys(tabMeta).length,
+        currentActiveTimeMs: currentActiveTime,
+      }, correlationId);
     }
-  }
 
-  // Before writing, re-read tabMeta from storage and preserve any concurrent
-  // navigation resets (identified by a more recent refreshWallTime). This
-  // prevents the evaluation cycle's stale snapshot from overwriting a tab
-  // that was just reset to green by the navigation or focus-refresh handler.
-  const freshSnapshot = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-  const freshTabMeta = freshSnapshot[STORAGE_KEYS.TAB_META] || {};
-  for (const [tabId, freshEntry] of Object.entries(freshTabMeta)) {
-    if (tabMeta[tabId] && freshEntry.refreshWallTime > tabMeta[tabId].refreshWallTime) {
-      tabMeta[tabId] = freshEntry;
-    }
-  }
-
-  await writeMultipleStateEntries({
-    [STORAGE_KEYS.TAB_META]: tabMeta,
-    [STORAGE_KEYS.WINDOW_STATE]: windowState,
+    return {
+      [STORAGE_KEYS.TAB_META]: tabMeta,
+      [STORAGE_KEYS.WINDOW_STATE]: windowState,
+    };
   });
-
-  if (transitionCount > 0) {
-    logger.info('Evaluation cycle complete with transitions', {
-      tabCount: Object.keys(tabMeta).length,
-      transitions: transitionCount,
-      currentActiveTimeMs: currentActiveTime,
-    }, correlationId);
-  } else {
-    logger.debug('Evaluation cycle complete, no transitions', {
-      tabCount: Object.keys(tabMeta).length,
-      currentActiveTimeMs: currentActiveTime,
-    }, correlationId);
-  }
-}
+ }
 
 // ─── Tab Events ──────────────────────────────────────────────────────────────
 
@@ -624,19 +908,20 @@ chrome.tabs.onCreated.addListener(async (tab) => {
     }
 
     const currentActiveTime = await getCurrentTotalActiveTimeMs();
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
-
-    if (!tabMeta[tab.id] && !tabMeta[String(tab.id)]) {
-      tabMeta[tab.id] = createFreshTabMetadata(tab, currentActiveTime);
-    }
-
     isTabPlacementInProgress = true;
     try {
-      await placeNewlyCreatedTabNearItsContext(tab, tab.windowId, tabMeta, windowState, settings);
-      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS], async (storedState) => {
+        const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+        const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+        const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
+
+        if (!tabMeta[tab.id] && !tabMeta[String(tab.id)]) {
+          tabMeta[tab.id] = createFreshTabMetadata(tab, currentActiveTime);
+        }
+
+        await placeNewlyCreatedTabNearItsContext(tab, tab.windowId, tabMeta, windowState, settings);
+        return { [STORAGE_KEYS.TAB_META]: tabMeta };
+      });
     } finally {
       isTabPlacementInProgress = false;
     }
@@ -657,25 +942,28 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
       logger.debug('Tab removed due to window closing, skipping', { tabId }, correlationId);
       return;
     }
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const removedTabMetadata = tabMeta[tabId] || tabMeta[String(tabId)] || null;
-    delete tabMeta[tabId];
-    delete tabMeta[String(tabId)];
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const removedTabMetadata = tabMeta[tabId] || tabMeta[String(tabId)] || null;
 
-    const windowStateData = await readValidatedStateFromStorage([STORAGE_KEYS.WINDOW_STATE]);
-    const windowState = windowStateData[STORAGE_KEYS.WINDOW_STATE] || {};
-    if (removedTabMetadata && removedTabMetadata.isSpecialGroup && removedTabMetadata.groupId !== null) {
-      const managedGroupType = getManagedGroupType(removedTabMetadata.groupId, removeInfo.windowId, windowState);
-      if (managedGroupType) {
-        await removeManagedGroupIfEmpty(removeInfo.windowId, managedGroupType, windowState);
-        await writeMultipleStateEntries({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+      delete tabMeta[tabId];
+      delete tabMeta[String(tabId)];
+
+      if (removedTabMetadata && removedTabMetadata.isSpecialGroup && removedTabMetadata.groupId !== null) {
+        const managedGroupType = getManagedGroupType(removedTabMetadata.groupId, removeInfo.windowId, windowState);
+        if (managedGroupType) {
+          await removeManagedGroupIfEmpty(removeInfo.windowId, managedGroupType, windowState);
+        }
       }
-    }
 
-    await dissolveUnnamedGroupsWithOnlyOneTab(removeInfo.windowId, tabMeta, windowState);
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      await dissolveUnnamedGroupsWithOnlyOneTab(removeInfo.windowId, tabMeta, windowState);
+
+      return {
+        [STORAGE_KEYS.TAB_META]: tabMeta,
+        [STORAGE_KEYS.WINDOW_STATE]: windowState,
+      };
+    });
 
     logger.debug('Tab removed', { tabId, windowId: removeInfo.windowId }, correlationId);
     scheduleDebouncedSortAndUpdate(removeInfo.windowId);
@@ -701,19 +989,28 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
   if (changeInfo.groupId !== undefined && !isEvaluationCycleInProgress && !isTabPlacementInProgress && !isSortUpdateInProgress && !tabsCurrentlyBeingResetByNavigation.has(tabId)) {
     try {
-      const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
-      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-      const tabEntry = tabMeta[tabId] || tabMeta[String(tabId)];
-      const newGroupId = changeInfo.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? changeInfo.groupId : null;
-      if (tabEntry) {
-        const previousGroupId = tabEntry.groupId;
-        tabEntry.groupId = newGroupId;
-        tabEntry.isSpecialGroup = newGroupId !== null && isManagedAgingGroup(newGroupId, tab.windowId, windowState);
-        logger.debug('Tab group changed', { tabId, oldGroupId: previousGroupId, newGroupId, windowId: tab.windowId }, correlationId);
-      }
-      await dissolveUnnamedGroupsWithOnlyOneTab(tab.windowId, tabMeta, windowState);
-      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE], async (storedState) => {
+        const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+        const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+        let tabEntry = tabMeta[tabId] || tabMeta[String(tabId)];
+        if (!tabEntry && tab && !tab.pinned && isNormalWindow(tab.windowId)) {
+          const currentActiveTime = await getCurrentTotalActiveTimeMs();
+          tabEntry = createFreshTabMetadata(tab, currentActiveTime);
+          tabMeta[tabId] = tabEntry;
+        }
+        const newGroupId = changeInfo.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? changeInfo.groupId : null;
+        if (tabEntry) {
+          const previousGroupId = tabEntry.groupId;
+          tabEntry.groupId = newGroupId;
+          tabEntry.isSpecialGroup = newGroupId !== null && isManagedAgingGroup(newGroupId, tab.windowId, windowState);
+          tabEntry.managedGroupType = tabEntry.isSpecialGroup
+            ? getManagedGroupType(newGroupId, tab.windowId, windowState)
+            : null;
+          logger.debug('Tab group changed', { tabId, oldGroupId: previousGroupId, newGroupId, windowId: tab.windowId }, correlationId);
+        }
+        await dissolveUnnamedGroupsWithOnlyOneTab(tab.windowId, tabMeta, windowState);
+        return { [STORAGE_KEYS.TAB_META]: tabMeta };
+      });
       scheduleDebouncedSortAndUpdate(tab.windowId);
     } catch (error) {
       logger.error('onUpdated groupId handler failed', { tabId, error: error.message }, correlationId);
@@ -721,18 +1018,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
   }
   if (changeInfo.pinned !== undefined) {
     try {
-      const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-      if (changeInfo.pinned) {
-        delete tabMeta[tabId];
-        delete tabMeta[String(tabId)];
-        logger.debug('Tab pinned, removed from tracking', { tabId }, correlationId);
-      } else if (isNormalWindow(tab.windowId)) {
-        const currentActiveTime = await getCurrentTotalActiveTimeMs();
-        tabMeta[tabId] = createFreshTabMetadata(tab, currentActiveTime);
-        logger.debug('Tab unpinned, added as fresh green', { tabId }, correlationId);
-      }
-      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+      await mutateTrackedState([STORAGE_KEYS.TAB_META], async (storedState) => {
+        const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+        if (changeInfo.pinned) {
+          delete tabMeta[tabId];
+          delete tabMeta[String(tabId)];
+          logger.debug('Tab pinned, removed from tracking', { tabId }, correlationId);
+        } else if (isNormalWindow(tab.windowId)) {
+          const currentActiveTime = await getCurrentTotalActiveTimeMs();
+          tabMeta[tabId] = createFreshTabMetadata(tab, currentActiveTime);
+          logger.debug('Tab unpinned, added as fresh green', { tabId }, correlationId);
+        }
+        return { [STORAGE_KEYS.TAB_META]: tabMeta };
+      });
     } catch (error) {
       logger.error('onUpdated pinned handler failed', { tabId, error: error.message }, correlationId);
     }
@@ -743,16 +1041,19 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
   if (isEvaluationCycleInProgress || isSortUpdateInProgress) return;
+  if (tabsCurrentlyBeingResetByNavigation.has(tabId)) return;
   const correlationId = logger.correlationId();
   try {
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const { dissolved } = await dissolveUnnamedGroupsWithOnlyOneTab(moveInfo.windowId, tabMeta, windowState);
-    if (dissolved > 0) {
-      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
-      logger.debug('Dissolved groups after tab move', { tabId, windowId: moveInfo.windowId, dissolved }, correlationId);
-    }
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const { dissolved } = await dissolveUnnamedGroupsWithOnlyOneTab(moveInfo.windowId, tabMeta, windowState);
+      if (dissolved > 0) {
+        logger.debug('Dissolved groups after tab move', { tabId, windowId: moveInfo.windowId, dissolved }, correlationId);
+        return { [STORAGE_KEYS.TAB_META]: tabMeta };
+      }
+      return {};
+    });
     scheduleDebouncedSortAndUpdate(moveInfo.windowId);
   } catch (error) {
     logger.warn('onMoved dissolution check failed', { tabId, error: error.message }, correlationId);
@@ -795,63 +1096,68 @@ async function refreshTabAgeAfterSustainedFocus(tabId, windowId) {
       if (tab.pinned || !isNormalWindow(tab.windowId)) return;
     } catch { return; }
 
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
-    const existingEntry = tabMeta[tabId] || tabMeta[String(tabId)];
-    if (!existingEntry) return;
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
+      const currentActiveTime = await getCurrentTotalActiveTimeMs();
 
-    const currentActiveTime = await getCurrentTotalActiveTimeMs();
-    const refreshedEntry = resetTabAgeAfterNavigation(existingEntry, currentActiveTime, existingEntry.url);
-    tabMeta[tabId] = refreshedEntry;
+      await synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, tab.windowId, false, settings);
+      const existingEntry = tabMeta[tabId] || tabMeta[String(tabId)];
+      if (!existingEntry) return {};
 
-    let isInManagedGroup = existingEntry.isSpecialGroup && existingEntry.groupId !== null;
-    let managedGroupId = isInManagedGroup ? existingEntry.groupId : null;
-
-    if (!isInManagedGroup) {
-      const liveGroupId = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
-        ? tab.groupId : null;
-      if (liveGroupId !== null && isManagedAgingGroup(liveGroupId, tab.windowId, windowState)) {
-        isInManagedGroup = true;
-        managedGroupId = liveGroupId;
-        refreshedEntry.groupId = liveGroupId;
-        refreshedEntry.isSpecialGroup = true;
-      }
-    }
-
-    if (isInManagedGroup) {
-      await removeTabFromItsGroup(tabId);
-      refreshedEntry.groupId = null;
-      refreshedEntry.isSpecialGroup = false;
+      const refreshedEntry = resetTabAgeAfterNavigation(existingEntry, currentActiveTime, existingEntry.url);
       tabMeta[tabId] = refreshedEntry;
 
-      try {
-        await chrome.tabs.move(tabId, { index: 0 });
-      } catch (moveError) {
-        logger.warn('Failed to move ungrouped tab to green zone', {
-          tabId,
-          error: moveError.message,
+      let isInManagedGroup = existingEntry.isSpecialGroup && existingEntry.groupId !== null;
+      let managedGroupId = isInManagedGroup ? existingEntry.groupId : null;
+
+      if (!isInManagedGroup) {
+        const liveGroupId = tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+          ? tab.groupId : null;
+        if (liveGroupId !== null && isManagedAgingGroup(liveGroupId, tab.windowId, windowState)) {
+          isInManagedGroup = true;
+          managedGroupId = liveGroupId;
+          refreshedEntry.groupId = liveGroupId;
+          refreshedEntry.isSpecialGroup = true;
+          refreshedEntry.managedGroupType = getManagedGroupType(liveGroupId, tab.windowId, windowState);
+        }
+      }
+
+      if (isInManagedGroup) {
+        await removeTabFromItsGroup(tabId);
+        refreshedEntry.groupId = null;
+        refreshedEntry.isSpecialGroup = false;
+        refreshedEntry.managedGroupType = null;
+        tabMeta[tabId] = refreshedEntry;
+
+        try {
+          await chrome.tabs.move(tabId, { index: 0 });
+        } catch (moveError) {
+          logger.warn('Failed to move ungrouped tab to green zone', {
+            tabId,
+            error: moveError.message,
+          }, correlationId);
+        }
+
+        const groupType = getManagedGroupType(managedGroupId, existingEntry.windowId, windowState);
+        if (groupType) {
+          await removeManagedGroupIfEmpty(existingEntry.windowId, groupType, windowState);
+        }
+
+        logger.debug('Focus refresh: tab removed from special group', {
+          tabId, specialGroupId: managedGroupId, windowId: existingEntry.windowId,
         }, correlationId);
       }
 
-      const groupType = getManagedGroupType(managedGroupId, existingEntry.windowId, windowState);
-      if (groupType) {
-        await removeManagedGroupIfEmpty(existingEntry.windowId, groupType, windowState);
+      const isAgingEnabled = settings.agingEnabled !== false;
+      if (isAgingEnabled) {
+        await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
       }
 
-      logger.debug('Focus refresh: tab removed from special group', {
-        tabId, specialGroupId: managedGroupId, windowId: existingEntry.windowId,
-      }, correlationId);
-    }
-
-    const isAgingEnabled = settings.agingEnabled !== false;
-    if (isAgingEnabled) {
-      await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
-    }
-
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
-    logger.debug('Focus-based age refresh applied', { tabId, windowId }, correlationId);
+      logger.debug('Focus-based age refresh applied', { tabId, windowId }, correlationId);
+      return { [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState };
+    });
   } catch (error) {
     logger.error('Focus refresh handler failed', { tabId, error: error.message }, correlationId);
   } finally {
@@ -887,16 +1193,18 @@ function checkAndClearDiscardRestoreMarker(tabId, currentTime) {
  * Suppresses non-user navigations (session restore, discarded tab reload, same-URL reload).
  * If the tab was in a managed group, it's ungrouped and moved to the green zone.
  */
-async function resetTabAgeOnUserNavigation(tabId, eventSource) {
+async function resetTabAgeOnUserNavigation(tabId, eventSource, eventUrl = '') {
   if (isStartupStatePending()) {
-    return;
+    self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'startup-pending' };
+    return self.__lastNavigationResetDebug;
   }
 
   const now = Date.now();
   const lastHandledAt = lastNavigationTimestampByTab.get(tabId) || 0;
   if (now - lastHandledAt < NAVIGATION_DEBOUNCE_DELAY_MS) {
     logger.debug('Navigation debounced', { tabId, source: eventSource, sinceLast: now - lastHandledAt });
-    return;
+    self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'debounced', sinceLast: now - lastHandledAt };
+    return self.__lastNavigationResetDebug;
   }
   lastNavigationTimestampByTab.set(tabId, now);
 
@@ -905,91 +1213,129 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource) {
   try {
     if (checkAndClearDiscardRestoreMarker(tabId, now)) {
       logger.debug('Ignoring navigation immediately after discarded-tab restore', { tabId, source: eventSource }, correlationId);
-      return;
+      self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'discard-restore-suppressed' };
+      return self.__lastNavigationResetDebug;
     }
 
-    let navigatedToUrl = '';
+    let navigatedToUrl = eventUrl || '';
+    let tab;
     try {
-      const tab = await chrome.tabs.get(tabId);
+      tab = await chrome.tabs.get(tabId);
       if (tab.discarded || tab.status === 'unloaded') {
         logger.debug('Ignoring navigation for discarded/suspended tab', { tabId, source: eventSource }, correlationId);
-        return;
+        self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'discarded-or-unloaded' };
+        return self.__lastNavigationResetDebug;
       }
-      if (!isNormalWindow(tab.windowId)) return;
-      navigatedToUrl = tab.url || '';
-    } catch { /* tab gone */ }
-
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
-    const existingEntry = tabMeta[tabId] || tabMeta[String(tabId)];
-    if (!existingEntry) {
-      logger.debug('Navigation for untracked tab, skipping', { tabId, source: eventSource }, correlationId);
-      return;
+      if (!isNormalWindow(tab.windowId)) {
+        self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'non-normal-window', windowId: tab.windowId };
+        return self.__lastNavigationResetDebug;
+      }
+      if (!navigatedToUrl) {
+        navigatedToUrl = tab.url || '';
+      }
+    } catch {
+      self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'tab-gone-before-read' };
+      return self.__lastNavigationResetDebug;
     }
 
-    // Suppress session-restore "navigations" where URL matches what we already stored
-    if (navigatedToUrl && existingEntry.url && navigatedToUrl === existingEntry.url) {
-      logger.debug('Navigation URL matches stored URL, suppressing age reset', { tabId, source: eventSource, url: navigatedToUrl }, correlationId);
-      return;
-    }
+    const result = await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE, STORAGE_KEYS.SETTINGS], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
+      const currentActiveTime = await getCurrentTotalActiveTimeMs();
+      const preSyncEntry = tabMeta[tabId] || tabMeta[String(tabId)] || null;
+      const preSyncUrl = preSyncEntry?.url || '';
 
-    const currentActiveTime = await getCurrentTotalActiveTimeMs();
-    const refreshedEntry = resetTabAgeAfterNavigation(existingEntry, currentActiveTime, navigatedToUrl);
-    tabMeta[tabId] = refreshedEntry;
+      await synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, tab.windowId, false, settings);
+      const existingEntry = tabMeta[tabId] || tabMeta[String(tabId)];
+      if (!existingEntry) {
+        logger.debug('Navigation for untracked tab, skipping', { tabId, source: eventSource }, correlationId);
+        self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'untracked-tab', windowId: tab.windowId };
+        return {};
+      }
 
-    let isInManagedGroup = existingEntry.isSpecialGroup && existingEntry.groupId !== null;
-    let managedGroupId = isInManagedGroup ? existingEntry.groupId : null;
+      if (navigatedToUrl && preSyncUrl && navigatedToUrl === preSyncUrl) {
+        logger.debug('Navigation URL matches stored URL, suppressing age reset', { tabId, source: eventSource, url: navigatedToUrl }, correlationId);
+        self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'same-url', url: navigatedToUrl };
+        return {};
+      }
 
-    if (!isInManagedGroup) {
-      try {
-        const liveTab = await chrome.tabs.get(tabId);
-        const liveGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
-          ? liveTab.groupId : null;
-        if (liveGroupId !== null && isManagedAgingGroup(liveGroupId, liveTab.windowId, windowState)) {
-          isInManagedGroup = true;
-          managedGroupId = liveGroupId;
-          refreshedEntry.groupId = liveGroupId;
-          refreshedEntry.isSpecialGroup = true;
-        }
-      } catch { /* tab may have been removed */ }
-    }
-
-    if (isInManagedGroup) {
-      await removeTabFromItsGroup(tabId);
-      refreshedEntry.groupId = null;
-      refreshedEntry.isSpecialGroup = false;
+      const refreshedEntry = resetTabAgeAfterNavigation(existingEntry, currentActiveTime, navigatedToUrl);
       tabMeta[tabId] = refreshedEntry;
 
-      try {
-        await chrome.tabs.move(tabId, { index: 0 });
-      } catch (moveError) {
-        logger.warn('Failed to move ungrouped tab to green zone', {
-          tabId,
-          error: moveError.message,
+      let isInManagedGroup = existingEntry.isSpecialGroup && existingEntry.groupId !== null;
+      let managedGroupId = isInManagedGroup ? existingEntry.groupId : null;
+
+      if (!isInManagedGroup) {
+        try {
+          const liveTab = await chrome.tabs.get(tabId);
+          const liveGroupId = liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE
+            ? liveTab.groupId : null;
+          if (liveGroupId !== null && isManagedAgingGroup(liveGroupId, liveTab.windowId, windowState)) {
+            isInManagedGroup = true;
+            managedGroupId = liveGroupId;
+            refreshedEntry.groupId = liveGroupId;
+            refreshedEntry.isSpecialGroup = true;
+            refreshedEntry.managedGroupType = getManagedGroupType(liveGroupId, liveTab.windowId, windowState);
+          }
+        } catch { }
+      }
+
+      if (isInManagedGroup) {
+        await removeTabFromItsGroup(tabId);
+        refreshedEntry.groupId = null;
+        refreshedEntry.isSpecialGroup = false;
+        refreshedEntry.managedGroupType = null;
+        tabMeta[tabId] = refreshedEntry;
+
+        try {
+          await chrome.tabs.move(tabId, { index: 0 });
+        } catch (moveError) {
+          logger.warn('Failed to move ungrouped tab to green zone', {
+            tabId,
+            error: moveError.message,
+          }, correlationId);
+        }
+
+        const groupType = getManagedGroupType(managedGroupId, existingEntry.windowId, windowState);
+        if (groupType) {
+          await removeManagedGroupIfEmpty(existingEntry.windowId, groupType, windowState);
+        }
+
+        logger.debug('Tab navigated out of special group', {
+          tabId, specialGroupId: managedGroupId, windowId: existingEntry.windowId,
         }, correlationId);
       }
 
-      const groupType = getManagedGroupType(managedGroupId, existingEntry.windowId, windowState);
-      if (groupType) {
-        await removeManagedGroupIfEmpty(existingEntry.windowId, groupType, windowState);
+      const isAgingEnabled = settings.agingEnabled !== false;
+      if (isAgingEnabled) {
+        await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
       }
 
-      logger.debug('Tab navigated out of special group', {
-        tabId, specialGroupId: managedGroupId, windowId: existingEntry.windowId,
-      }, correlationId);
+      self.__lastNavigationResetDebug = {
+        tabId,
+        source: eventSource,
+        outcome: 'handled',
+        windowId: existingEntry.windowId,
+        navigatedToUrl,
+        status: refreshedEntry.status,
+        groupId: refreshedEntry.groupId,
+        isSpecialGroup: refreshedEntry.isSpecialGroup,
+      };
+
+      return { [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState };
+    });
+
+    if (!result || Object.keys(result).length === 0) {
+      return self.__lastNavigationResetDebug;
     }
 
-    const isAgingEnabled = settings.agingEnabled !== false;
-    if (isAgingEnabled) {
-      await sortTabsAndGroupsByLifecycleZone(existingEntry.windowId, tabMeta, windowState, undefined, settings);
-    }
-
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta, [STORAGE_KEYS.WINDOW_STATE]: windowState });
     logger.debug('Navigation handled, refresh time reset', { tabId, source: eventSource }, correlationId);
+    return self.__lastNavigationResetDebug;
   } catch (error) {
     logger.error('Navigation handler failed', { tabId, source: eventSource, error: error.message }, correlationId);
+    self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'error', error: error.message };
+    return self.__lastNavigationResetDebug;
   } finally {
     tabsCurrentlyBeingResetByNavigation.delete(tabId);
   }
@@ -997,12 +1343,12 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource) {
 
 chrome.webNavigation.onCommitted.addListener(async (details) => {
   if (details.frameId !== 0) return;
-  await resetTabAgeOnUserNavigation(details.tabId, 'onCommitted');
+  await resetTabAgeOnUserNavigation(details.tabId, 'onCommitted', details.url || '');
 });
 
 chrome.webNavigation.onHistoryStateUpdated.addListener(async (details) => {
   if (details.frameId !== 0) return;
-  await resetTabAgeOnUserNavigation(details.tabId, 'onHistoryStateUpdated');
+  await resetTabAgeOnUserNavigation(details.tabId, 'onHistoryStateUpdated', details.url || '');
 });
 
 // ─── Window Focus ────────────────────────────────────────────────────────────
@@ -1033,22 +1379,23 @@ chrome.windows.onRemoved.addListener(async (windowId) => {
   normalWindowIds.delete(windowId);
   const correlationId = logger.correlationId();
   try {
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
 
-    for (const [tabId, tabEntry] of Object.entries(tabMeta)) {
-      if (tabEntry.windowId === windowId || tabEntry.windowId === Number(windowId)) {
-        delete tabMeta[tabId];
+      for (const [tabId, tabEntry] of Object.entries(tabMeta)) {
+        if (tabEntry.windowId === windowId || tabEntry.windowId === Number(windowId)) {
+          delete tabMeta[tabId];
+        }
       }
-    }
 
-    delete windowState[windowId];
-    delete windowState[String(windowId)];
+      delete windowState[windowId];
+      delete windowState[String(windowId)];
 
-    await writeMultipleStateEntries({
-      [STORAGE_KEYS.TAB_META]: tabMeta,
-      [STORAGE_KEYS.WINDOW_STATE]: windowState,
+      return {
+        [STORAGE_KEYS.TAB_META]: tabMeta,
+        [STORAGE_KEYS.WINDOW_STATE]: windowState,
+      };
     });
     logger.info('Window removed, state cleaned up', { windowId }, correlationId);
   } catch (error) {
@@ -1066,20 +1413,21 @@ chrome.tabs.onDetached.addListener(async (tabId, detachInfo) => {
 chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
   const correlationId = logger.correlationId();
   try {
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-    const tabEntry = tabMeta[tabId] || tabMeta[String(tabId)];
-    if (tabEntry) {
+    await mutateTrackedState([STORAGE_KEYS.TAB_META], async (storedState) => {
+      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+      const tabEntry = tabMeta[tabId] || tabMeta[String(tabId)];
+      if (!tabEntry) return {};
       tabEntry.windowId = attachInfo.newWindowId;
       tabEntry.groupId = null;
       tabEntry.isSpecialGroup = false;
-      await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
-      logger.debug('Tab attached to new window, meta updated', {
-        tabId,
-        newWindowId: attachInfo.newWindowId,
-      }, correlationId);
-      scheduleDebouncedSortAndUpdate(attachInfo.newWindowId);
-    }
+      tabEntry.managedGroupType = null;
+      return { [STORAGE_KEYS.TAB_META]: tabMeta };
+    });
+    logger.debug('Tab attached to new window, meta updated', {
+      tabId,
+      newWindowId: attachInfo.newWindowId,
+    }, correlationId);
+    scheduleDebouncedSortAndUpdate(attachInfo.newWindowId);
   } catch (error) {
     logger.error('onAttached handler failed', { tabId, error: error.message }, correlationId);
   }
@@ -1090,32 +1438,33 @@ chrome.tabs.onAttached.addListener(async (tabId, attachInfo) => {
 chrome.tabGroups.onRemoved.addListener(async (group) => {
   const correlationId = logger.correlationId();
   try {
-    const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.WINDOW_STATE]);
-    const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
-    const windowEntry = windowState[group.windowId] || windowState[String(group.windowId)];
-    let stateChanged = false;
-    if (windowEntry && windowEntry.specialGroups) {
-      if (windowEntry.specialGroups.yellow === group.id) {
-        windowEntry.specialGroups.yellow = null;
+    const writes = await mutateTrackedState([STORAGE_KEYS.WINDOW_STATE], async (storedState) => {
+      const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
+      const windowEntry = windowState[group.windowId] || windowState[String(group.windowId)];
+      let stateChanged = false;
+      if (windowEntry && windowEntry.specialGroups) {
+        if (windowEntry.specialGroups.yellow === group.id) {
+          windowEntry.specialGroups.yellow = null;
+          stateChanged = true;
+        }
+        if (windowEntry.specialGroups.red === group.id) {
+          windowEntry.specialGroups.red = null;
+          stateChanged = true;
+        }
+      }
+      if (windowEntry && windowEntry.groupZones) {
+        delete windowEntry.groupZones[group.id];
+        delete windowEntry.groupZones[String(group.id)];
         stateChanged = true;
       }
-      if (windowEntry.specialGroups.red === group.id) {
-        windowEntry.specialGroups.red = null;
+      if (windowEntry && windowEntry.groupNaming) {
+        delete windowEntry.groupNaming[group.id];
+        delete windowEntry.groupNaming[String(group.id)];
         stateChanged = true;
       }
-    }
-    if (windowEntry && windowEntry.groupZones) {
-      delete windowEntry.groupZones[group.id];
-      delete windowEntry.groupZones[String(group.id)];
-      stateChanged = true;
-    }
-    if (windowEntry && windowEntry.groupNaming) {
-      delete windowEntry.groupNaming[group.id];
-      delete windowEntry.groupNaming[String(group.id)];
-      stateChanged = true;
-    }
-    if (stateChanged) {
-      await writeMultipleStateEntries({ [STORAGE_KEYS.WINDOW_STATE]: windowState });
+      return stateChanged ? { [STORAGE_KEYS.WINDOW_STATE]: windowState } : {};
+    });
+    if (writes && Object.keys(writes).length > 0) {
       logger.info('Group removed externally, cleaned metadata', { groupId: group.id, windowId: group.windowId }, correlationId);
     }
     logger.debug('Tab group removed', { groupId: group.id, windowId: group.windowId }, correlationId);
@@ -1216,8 +1565,6 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
     // Age cap: when aging transitions from disabled → enabled
     if (oldSettings.agingEnabled === false && newSettings.agingEnabled !== false) {
       try {
-        const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-        const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
         const now = Date.now();
         const currentActiveTime = await getCurrentTotalActiveTimeMs();
         const redToGoneThreshold = newSettings.thresholds?.redToGone || DEFAULT_AGING_THRESHOLDS.RED_TO_GONE;
@@ -1226,29 +1573,35 @@ chrome.storage.onChanged.addListener(async (changes, areaName) => {
         const activeTimeCapTimestamp = currentActiveTime - ageCap;
         let tabsCapped = 0;
 
-        for (const tabEntry of Object.values(tabMeta)) {
-          let wasCapped = false;
-          if (tabEntry.refreshWallTime < wallClockCapTimestamp) {
-            tabEntry.refreshWallTime = wallClockCapTimestamp;
-            wasCapped = true;
+        await mutateTrackedState([STORAGE_KEYS.TAB_META], async (storedState) => {
+          const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+
+          for (const tabEntry of Object.values(tabMeta)) {
+            let wasCapped = false;
+            if (tabEntry.refreshWallTime < wallClockCapTimestamp) {
+              tabEntry.refreshWallTime = wallClockCapTimestamp;
+              wasCapped = true;
+            }
+            if (tabEntry.refreshActiveTime < activeTimeCapTimestamp) {
+              tabEntry.refreshActiveTime = activeTimeCapTimestamp;
+              wasCapped = true;
+            }
+            if (wasCapped) tabsCapped++;
           }
-          if (tabEntry.refreshActiveTime < activeTimeCapTimestamp) {
-            tabEntry.refreshActiveTime = activeTimeCapTimestamp;
-            wasCapped = true;
-          }
-          if (wasCapped) tabsCapped++;
-        }
+
+          if (tabsCapped === 0) return {};
+          return { [STORAGE_KEYS.TAB_META]: tabMeta };
+        });
 
         if (tabsCapped > 0) {
-          await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
           logger.info('Age cap applied on aging re-enable', {
             cappedCount: tabsCapped,
-            tabCount: Object.keys(tabMeta).length,
+            tabCount: Object.keys((await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]))[STORAGE_KEYS.TAB_META] || {}).length,
             capWindowMs: ageCap,
           }, correlationId);
         } else {
           logger.debug('Age cap check: no tabs needed capping', {
-            tabCount: Object.keys(tabMeta).length,
+            tabCount: Object.keys((await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]))[STORAGE_KEYS.TAB_META] || {}).length,
           }, correlationId);
         }
       } catch (error) {
@@ -1347,40 +1700,43 @@ async function updateManagedGroupTitlesFromSettings(settings, correlationId) {
 async function flushDeferredStartupCreatedTabsIntoStorage(correlationId) {
   if (deferredStartupTabMetaById.size === 0) return 0;
 
-  const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-  const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
   let addedCount = 0;
+  await mutateTrackedState([STORAGE_KEYS.TAB_META], async (storedState) => {
+    const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
 
-  for (const [tabId, deferredEntry] of deferredStartupTabMetaById) {
-    if (tabMeta[tabId] || tabMeta[String(tabId)]) {
-      deferredStartupTabMetaById.delete(tabId);
-      continue;
-    }
-
-    try {
-      const liveTab = await chrome.tabs.get(Number(tabId));
-      if (liveTab.pinned || !isNormalWindow(liveTab.windowId)) {
+    for (const [tabId, deferredEntry] of deferredStartupTabMetaById) {
+      if (tabMeta[tabId] || tabMeta[String(tabId)]) {
         deferredStartupTabMetaById.delete(tabId);
         continue;
       }
 
-      tabMeta[tabId] = {
-        ...deferredEntry,
-        tabId: liveTab.id,
-        windowId: liveTab.windowId,
-        groupId: liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null,
-        pinned: liveTab.pinned || false,
-        url: liveTab.url || deferredEntry.url || '',
-      };
-      addedCount++;
-    } catch {
+      try {
+        const liveTab = await chrome.tabs.get(Number(tabId));
+        if (liveTab.pinned || !isNormalWindow(liveTab.windowId)) {
+          deferredStartupTabMetaById.delete(tabId);
+          continue;
+        }
+
+        tabMeta[tabId] = {
+          ...deferredEntry,
+          tabId: liveTab.id,
+          windowId: liveTab.windowId,
+          groupId: liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null,
+          managedGroupType: deferredEntry.managedGroupType ?? null,
+          pinned: liveTab.pinned || false,
+          url: liveTab.url || deferredEntry.url || '',
+        };
+        addedCount++;
+      } catch {
+      }
+
+      deferredStartupTabMetaById.delete(tabId);
     }
 
-    deferredStartupTabMetaById.delete(tabId);
-  }
+    return addedCount === 0 ? {} : { [STORAGE_KEYS.TAB_META]: tabMeta };
+  });
 
   if (addedCount > 0) {
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
     logger.info('Flushed deferred startup tabs into storage', { addedCount }, correlationId);
   }
 
@@ -1416,25 +1772,14 @@ async function scanAndTrackAllExistingTabs(correlationId) {
   try {
     const allBrowserTabs = await chrome.tabs.query({});
     const currentActiveTime = await getCurrentTotalActiveTimeMs();
-    const now = Date.now();
     const tabMeta = {};
 
     for (const tab of allBrowserTabs) {
       if (tab.pinned || !isNormalWindow(tab.windowId)) continue;
-      tabMeta[tab.id] = {
-        tabId: tab.id,
-        windowId: tab.windowId,
-        refreshActiveTime: currentActiveTime,
-        refreshWallTime: now,
-        status: TAB_LIFECYCLE_STAGE.GREEN,
-        groupId: tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? tab.groupId : null,
-        isSpecialGroup: false,
-        pinned: false,
-        url: tab.url || '',
-      };
+      tabMeta[tab.id] = createFreshTabMetadata(tab, currentActiveTime);
     }
 
-    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+    await mutateTrackedState([STORAGE_KEYS.TAB_META], async () => ({ [STORAGE_KEYS.TAB_META]: tabMeta }));
     logger.info('Scanned existing tabs', { count: Object.keys(tabMeta).length }, correlationId);
   } catch (error) {
     logger.error('Failed to scan existing tabs', { error: error.message }, correlationId);
@@ -1758,10 +2103,10 @@ async function performReconciliation(correlationId) {
     // Persist reconciled state BEFORE recoloring managed groups, so that any
     // onUpdated handlers triggered by chrome.tabGroups.update read the correct
     // remapped special group IDs rather than stale pre-restart values.
-    await writeMultipleStateEntries({
+    await mutateTrackedState([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE], async () => ({
       [STORAGE_KEYS.TAB_META]: reconciledTabMeta,
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
-    });
+    }));
 
     // Re-apply colors to managed groups — Chrome may reset them to grey on restart.
     for (const [, windowEntry] of Object.entries(reconciledWindowState)) {
@@ -1787,9 +2132,9 @@ async function performReconciliation(correlationId) {
     }
 
     // Re-persist if any stale special group references were cleared during recoloring.
-    await writeMultipleStateEntries({
+    await mutateTrackedState([STORAGE_KEYS.WINDOW_STATE], async () => ({
       [STORAGE_KEYS.WINDOW_STATE]: reconciledWindowState,
-    });
+    }));
 
     // Seed the group state cache so the first tabGroups.onUpdated (e.g. a
     // collapse) can be correctly identified as a no-op instead of triggering

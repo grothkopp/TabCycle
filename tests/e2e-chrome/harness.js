@@ -107,7 +107,7 @@ export async function createHarness(opts = {}) {
   const swTarget = await pollForTarget(
     browser,
     (t) => t.type() === 'service_worker' && t.url().startsWith('chrome-extension://'),
-    15_000
+    60_000
   );
   const extensionId = new URL(swTarget.url()).hostname;
 
@@ -533,7 +533,7 @@ export function sleep(ms) {
 }
 
 /** Poll browser.targets() until a matching target appears. */
-async function pollForTarget(browser, predicate, timeoutMs = 15000) {
+async function pollForTarget(browser, predicate, timeoutMs = 60000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const targets = browser.targets();

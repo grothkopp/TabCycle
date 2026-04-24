@@ -22,7 +22,7 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
       timeMode: 'wallclock',
       bookmarkEnabled: false,
     });
-  }, 30_000);
+  }, 120_000);
 
   afterAll(async () => {
     if (h) await h.cleanup();

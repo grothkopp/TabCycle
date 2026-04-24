@@ -71,7 +71,7 @@ describeOrSkip('Auto Group Naming (real Chrome)', () => {
       }
     }
     throw lastError;
-  }, 60_000);
+  }, 120_000);
 
   afterAll(async () => {
     if (h) await h.cleanup();

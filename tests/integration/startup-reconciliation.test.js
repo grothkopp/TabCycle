@@ -5,6 +5,7 @@ const store = {};
 const listeners = {};
 let liveTabs = [];
 let liveWindows = [{ id: 1, type: 'normal' }];
+let liveGroups = [];
 let recoverActiveTimeAfterRestartMock;
 let updateActiveTimeOnWindowFocusChangeMock;
 let saveActiveTimeToStorageMock;
@@ -52,6 +53,10 @@ function deferred() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function getSpecialGroupsForWindow(windowId, windowState) {
+  return windowState?.[windowId]?.specialGroups || windowState?.[String(windowId)]?.specialGroups || {};
 }
 
 async function waitFor(predicate, attempts = 20) {
@@ -149,7 +154,12 @@ globalThis.chrome = {
     TAB_GROUP_ID_NONE: -1,
     onRemoved: makeEvent('tabGroupsOnRemoved'),
     onUpdated: makeEvent('tabGroupsOnUpdated'),
-    query: jest.fn(async () => []),
+    query: jest.fn(async (query) => {
+      if (query?.windowId !== undefined) {
+        return liveGroups.filter((group) => group.windowId === query.windowId);
+      }
+      return liveGroups;
+    }),
     update: jest.fn(async () => {}),
     move: jest.fn(async () => {}),
     get: jest.fn(async () => ({ id: 1, windowId: 1 })),
@@ -161,8 +171,16 @@ globalThis.chrome = {
 };
 
 await jest.unstable_mockModule('../../src/background/group-manager.js', () => ({
-  isManagedAgingGroup: jest.fn(() => false),
-  getManagedGroupType: jest.fn(() => null),
+  isManagedAgingGroup: jest.fn((groupId, windowId, windowState) => {
+    const specialGroups = getSpecialGroupsForWindow(windowId, windowState);
+    return specialGroups.yellow === groupId || specialGroups.red === groupId;
+  }),
+  getManagedGroupType: jest.fn((groupId, windowId, windowState) => {
+    const specialGroups = getSpecialGroupsForWindow(windowId, windowState);
+    if (specialGroups.yellow === groupId) return 'yellow';
+    if (specialGroups.red === groupId) return 'red';
+    return null;
+  }),
   removeManagedGroupIfEmpty: jest.fn(async () => {}),
   removeTabFromItsGroup: jest.fn(async () => {}),
   sortTabsAndGroupsByLifecycleZone: jest.fn(async () => {}),
@@ -202,9 +220,11 @@ await import('../../src/background/service-worker.js');
 
 describe('startup reconciliation integration', () => {
   beforeEach(() => {
+    self.__resetServiceWorkerDebugState();
     for (const key of Object.keys(store)) delete store[key];
     liveTabs = [];
     liveWindows = [{ id: 1, type: 'normal' }];
+    liveGroups = [];
     chrome.storage.local.get.mockClear();
     chrome.storage.local.set.mockClear();
     chrome.storage.local.remove.mockClear();
@@ -297,7 +317,7 @@ describe('startup reconciliation integration', () => {
     });
 
     const startupPromise = listeners.runtimeOnStartup();
-    await waitFor(() => evaluationStarted);
+    await waitFor(() => evaluationStarted || self.__evaluationCycleRunning, 100);
 
     const newTab = {
       id: 202,
@@ -376,6 +396,7 @@ describe('startup reconciliation integration', () => {
       };
       liveWindows = [{ id: 1, type: 'normal' }];
       liveTabs = [restoredTab];
+      liveGroups = [{ id: 501, windowId: 1, title: 'Yellow', color: 'yellow' }];
 
       await listeners.tabsOnCreated(restoredTab);
       expect(store[STORAGE_KEYS.TAB_META][101]).toBeUndefined();
@@ -390,7 +411,8 @@ describe('startup reconciliation integration', () => {
         refreshWallTime: 222,
         status: 'yellow',
         groupId: 501,
-        isSpecialGroup: false,
+        isSpecialGroup: true,
+        managedGroupType: 'yellow',
         pinned: false,
         url: 'https://kept.example',
       });
@@ -403,5 +425,92 @@ describe('startup reconciliation integration', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('self-heals missing special-group tabs from tracked peers during evaluation', async () => {
+    store[STORAGE_KEYS.SETTINGS] = {
+      ...defaultSettings(),
+      thresholds: { greenToYellow: 1000, yellowToRed: 2000, redToGone: 100000 },
+    };
+    store[STORAGE_KEYS.WINDOW_STATE] = {
+      1: { specialGroups: { yellow: null, red: 501 }, groupZones: { 501: 'red' }, groupNaming: {} },
+    };
+    store[STORAGE_KEYS.TAB_META] = {
+      101: {
+        tabId: 101,
+        windowId: 1,
+        refreshActiveTime: 0,
+        refreshWallTime: 100,
+        status: 'red',
+        groupId: 501,
+        isSpecialGroup: true,
+        managedGroupType: 'red',
+        pinned: false,
+        url: 'https://red-one.example',
+      },
+    };
+
+    liveGroups = [{ id: 501, windowId: 1, title: 'Red', color: 'red' }];
+    liveTabs = [
+      { id: 101, windowId: 1, groupId: 501, pinned: false, url: 'https://red-one.example', status: 'complete' },
+      { id: 102, windowId: 1, groupId: 501, pinned: false, url: 'https://red-two.example', status: 'complete' },
+    ];
+
+    await self.__runEvaluationCycle('test-self-heal-managed');
+
+    expect(store[STORAGE_KEYS.TAB_META][102]).toMatchObject({
+      tabId: 102,
+      windowId: 1,
+      refreshActiveTime: 0,
+      refreshWallTime: 100,
+      status: 'red',
+      groupId: 501,
+      isSpecialGroup: true,
+      managedGroupType: 'red',
+      pinned: false,
+      url: 'https://red-two.example',
+    });
+  });
+
+  it('self-heals grouped tabs from stored zone state and clears stale special-group ids', async () => {
+    store[STORAGE_KEYS.SETTINGS] = defaultSettings();
+    store[STORAGE_KEYS.WINDOW_STATE] = {
+      1: {
+        specialGroups: { yellow: 999, red: null },
+        groupZones: { 61: 'yellow', 999: 'yellow' },
+        groupNaming: {
+          999: {
+            firstUnnamedSeenAt: 1,
+            lastAutoNamedAt: null,
+            lastCandidate: null,
+            userEditLockUntil: 1,
+          },
+        },
+      },
+    };
+    store[STORAGE_KEYS.TAB_META] = {};
+
+    liveGroups = [{ id: 61, windowId: 1, title: 'Work', color: 'yellow' }];
+    liveTabs = [
+      { id: 201, windowId: 1, groupId: 61, pinned: false, url: 'https://zone.example', status: 'complete' },
+    ];
+
+    await self.__runEvaluationCycle('test-self-heal-zone');
+
+    expect(store[STORAGE_KEYS.TAB_META][201]).toMatchObject({
+      tabId: 201,
+      windowId: 1,
+      status: 'yellow',
+      groupId: 61,
+      isSpecialGroup: false,
+      managedGroupType: null,
+      pinned: false,
+      url: 'https://zone.example',
+    });
+    expect(store[STORAGE_KEYS.WINDOW_STATE][1]).toMatchObject({
+      specialGroups: { yellow: null, red: null },
+      groupZones: { 61: 'yellow' },
+      groupNaming: {},
+    });
   });
 });

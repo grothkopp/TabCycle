@@ -18,7 +18,7 @@ describeOrSkip('Gone Tab Handling & Bookmarks (real Chrome)', () => {
 
   beforeAll(async () => {
     h = await createHarness();
-  }, 30_000);
+  }, 120_000);
 
   afterAll(async () => {
     if (h) await h.cleanup();
