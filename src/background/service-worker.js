@@ -62,6 +62,8 @@ let isTabPlacementInProgress = false;
 let activeStartupHandlerCount = 0;
 let isBrowserStartupInProgress = false;
 let pendingReconciliationPromise = null;
+let startupReconciliationPending = false;
+let startupReconciliationRetryTimer = null;
 const tabsCurrentlyBeingResetByNavigation = new Set();
 
 // Cache of each group's last-seen title and color, used by the onGroupUpdated
@@ -73,6 +75,21 @@ const lastKnownGroupState = new Map();
 // popups, app windows) are excluded from all tracking so they never enter
 // tabMeta.  Updated by windows.onCreated / onRemoved and seeded on startup.
 const normalWindowIds = new Set();
+const deferredStartupTabMetaById = new Map();
+const STARTUP_RECONCILIATION_RETRY_DELAY_MS = 500;
+
+function isStartupStatePending() {
+  return isBrowserStartupInProgress || startupReconciliationPending;
+}
+
+function scheduleStartupReconciliationRetry(trigger) {
+  if (!startupReconciliationPending) return;
+  if (startupReconciliationRetryTimer) clearTimeout(startupReconciliationRetryTimer);
+  startupReconciliationRetryTimer = setTimeout(() => {
+    startupReconciliationRetryTimer = null;
+    void retryPendingStartupReconciliation(trigger);
+  }, STARTUP_RECONCILIATION_RETRY_DELAY_MS);
+}
 
 /** Returns true if `windowId` belongs to a normal browser window.
  *  If the cache has not been seeded yet, defaults to true to avoid
@@ -113,7 +130,7 @@ function resolveAutoNamingConfiguration(settings) {
 }
 
 function scheduleDebouncedSortAndUpdate(windowId) {
-  if (isEvaluationCycleInProgress || isSortUpdateInProgress) return;
+  if (isEvaluationCycleInProgress || isSortUpdateInProgress || startupReconciliationPending) return;
   const existingTimer = pendingSortTimersByWindow.get(windowId);
   if (existingTimer) clearTimeout(existingTimer);
   pendingSortTimersByWindow.set(windowId, setTimeout(() => {
@@ -280,16 +297,29 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     if (isFreshInstall) {
       await scanAndTrackAllExistingTabs(correlationId);
     } else {
-      await reconcileStoredStateWithBrowser(correlationId);
+      const reconciliationResult = await reconcileStoredStateWithBrowser(correlationId);
+      startupReconciliationPending = !reconciliationResult.completed;
+      if (startupReconciliationPending) {
+        scheduleStartupReconciliationRetry('onInstalled');
+      }
     }
 
-    await runTabAgingEvaluationCycle(correlationId);
-    await probeAndSyncCurrentFocusState(correlationId);
+    if (!startupReconciliationPending) {
+      await runTabAgingEvaluationCycle(correlationId);
+      await probeAndSyncCurrentFocusState(correlationId);
+    }
   } catch (error) {
     logger.error('onInstalled handler failed', { error: error.message, errorCode: ERROR_CODES.ERR_ALARM_CREATE }, correlationId);
   } finally {
     if (needsStartupGuard) {
       activeStartupHandlerCount--; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
+      if (!isStartupStatePending()) {
+        try {
+          await flushDeferredStartupCreatedTabsIntoStorage(correlationId);
+        } catch (flushError) {
+          logger.warn('Failed to flush deferred startup tabs', { error: flushError.message }, correlationId);
+        }
+      }
       logger.info('Startup guard cleared (onInstalled)', { reason: details.reason, refCount: activeStartupHandlerCount }, correlationId);
     }
   }
@@ -319,6 +349,7 @@ async function probeAndSyncCurrentFocusState(correlationId) {
 
 chrome.runtime.onStartup.addListener(async () => {
   activeStartupHandlerCount++; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
+  startupReconciliationPending = true;
   const correlationId = logger.correlationId();
   logger.info('Browser startup detected', null, correlationId);
 
@@ -333,19 +364,31 @@ chrome.runtime.onStartup.addListener(async () => {
       logger.info('Alarm recreated on startup', null, correlationId);
     }
 
-    await reconcileStoredStateWithBrowser(correlationId);
+    const reconciliationResult = await reconcileStoredStateWithBrowser(correlationId);
+    startupReconciliationPending = !reconciliationResult.completed;
 
-    await runTabAgingEvaluationCycle(correlationId);
+    if (startupReconciliationPending) {
+      scheduleStartupReconciliationRetry('onStartup');
+    } else {
+      await runTabAgingEvaluationCycle(correlationId);
 
-    // Probe Chrome for the currently focused window so the active time stopwatch
-    // starts immediately.  On browser startup (and extension reload) Chrome may
-    // not fire windows.onFocusChanged, leaving focusStartTime null and active
-    // time frozen until the user manually switches windows.
-    await probeAndSyncCurrentFocusState(correlationId);
+      // Probe Chrome for the currently focused window so the active time stopwatch
+      // starts immediately.  On browser startup (and extension reload) Chrome may
+      // not fire windows.onFocusChanged, leaving focusStartTime null and active
+      // time frozen until the user manually switches windows.
+      await probeAndSyncCurrentFocusState(correlationId);
+    }
   } catch (error) {
     logger.error('onStartup handler failed', { error: error.message, errorCode: ERROR_CODES.ERR_RECOVERY }, correlationId);
   } finally {
     activeStartupHandlerCount--; isBrowserStartupInProgress = activeStartupHandlerCount > 0;
+    if (!isStartupStatePending()) {
+      try {
+        await flushDeferredStartupCreatedTabsIntoStorage(correlationId);
+      } catch (flushError) {
+        logger.warn('Failed to flush deferred startup tabs', { error: flushError.message }, correlationId);
+      }
+    }
     logger.info('Startup guard cleared', { refCount: activeStartupHandlerCount }, correlationId);
   }
 });
@@ -400,6 +443,11 @@ async function runTabAgingEvaluationCycle(correlationId) {
  * transitions, sorts tabs/groups, handles gone tabs, and updates titles.
  */
 async function executeTabAgingEvaluation(correlationId) {
+  if (startupReconciliationPending) {
+    logger.info('Startup reconciliation pending, skipping evaluation cycle', null, correlationId);
+    return;
+  }
+
   await saveActiveTimeToStorage();
 
   const storedState = await readValidatedStateFromStorage([
@@ -453,6 +501,7 @@ async function executeTabAgingEvaluation(correlationId) {
       const actualGroupId = browserTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? browserTab.groupId : null;
       if (tabEntry.groupId !== actualGroupId) {
         tabEntry.groupId = actualGroupId;
+        tabEntry.isSpecialGroup = actualGroupId !== null && isManagedAgingGroup(actualGroupId, browserTab.windowId, windowState);
         staleGroupIdFixCount++;
       }
       if (browserTab.url && browserTab.url !== tabEntry.url) tabEntry.url = browserTab.url;
@@ -564,14 +613,12 @@ chrome.tabs.onCreated.addListener(async (tab) => {
       return;
     }
 
-    if (isBrowserStartupInProgress) {
-      const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
-      const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
-      if (!tabMeta[tab.id] && !tabMeta[String(tab.id)]) {
+    if (isStartupStatePending()) {
+      if (!deferredStartupTabMetaById.has(tab.id)) {
         const currentActiveTime = await getCurrentTotalActiveTimeMs();
-        tabMeta[tab.id] = createFreshTabMetadata(tab, currentActiveTime);
-        await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+        deferredStartupTabMetaById.set(tab.id, createFreshTabMetadata(tab, currentActiveTime));
       }
+      scheduleStartupReconciliationRetry('tab-created-during-startup');
       logger.debug('Startup in progress, skipping tab placement', { tabId: tab.id, windowId: tab.windowId }, correlationId);
       return;
     }
@@ -638,6 +685,13 @@ chrome.tabs.onRemoved.addListener(async (tabId, removeInfo) => {
 });
 
 chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (startupReconciliationPending) {
+    if (changeInfo.url !== undefined || changeInfo.groupId !== undefined || changeInfo.status === 'complete') {
+      scheduleStartupReconciliationRetry('tab-updated-during-startup');
+    }
+    return;
+  }
+
   const correlationId = logger.correlationId();
 
   if (changeInfo.discarded === false) {
@@ -645,11 +699,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
     logger.debug('Tab restored from discarded state', { tabId, windowId: tab.windowId }, correlationId);
   }
 
-  if (changeInfo.groupId !== undefined
-      && !isEvaluationCycleInProgress
-      && !isTabPlacementInProgress
-      && !isSortUpdateInProgress
-      && !tabsCurrentlyBeingResetByNavigation.has(tabId)) {
+  if (changeInfo.groupId !== undefined && !isEvaluationCycleInProgress && !isTabPlacementInProgress && !isSortUpdateInProgress && !tabsCurrentlyBeingResetByNavigation.has(tabId)) {
     try {
       const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META, STORAGE_KEYS.WINDOW_STATE]);
       const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
@@ -722,7 +772,7 @@ chrome.tabs.onActivated.addListener((activeInfo) => {
     pendingFocusRefreshTimer = null;
   }
 
-  if (isBrowserStartupInProgress) return;
+  if (isStartupStatePending()) return;
 
   const { tabId, windowId } = activeInfo;
   pendingFocusRefreshTimer = setTimeout(() => {
@@ -838,7 +888,7 @@ function checkAndClearDiscardRestoreMarker(tabId, currentTime) {
  * If the tab was in a managed group, it's ungrouped and moved to the green zone.
  */
 async function resetTabAgeOnUserNavigation(tabId, eventSource) {
-  if (isBrowserStartupInProgress) {
+  if (isStartupStatePending()) {
     return;
   }
 
@@ -974,6 +1024,9 @@ chrome.windows.onFocusChanged.addListener(async (windowId) => {
 
 chrome.windows.onCreated.addListener((window) => {
   if (window.type === 'normal') normalWindowIds.add(window.id);
+  if (window.type === 'normal' && startupReconciliationPending) {
+    scheduleStartupReconciliationRetry('window-created-during-startup');
+  }
 });
 
 chrome.windows.onRemoved.addListener(async (windowId) => {
@@ -1291,6 +1344,70 @@ async function updateManagedGroupTitlesFromSettings(settings, correlationId) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+async function flushDeferredStartupCreatedTabsIntoStorage(correlationId) {
+  if (deferredStartupTabMetaById.size === 0) return 0;
+
+  const storedState = await readValidatedStateFromStorage([STORAGE_KEYS.TAB_META]);
+  const tabMeta = storedState[STORAGE_KEYS.TAB_META] || {};
+  let addedCount = 0;
+
+  for (const [tabId, deferredEntry] of deferredStartupTabMetaById) {
+    if (tabMeta[tabId] || tabMeta[String(tabId)]) {
+      deferredStartupTabMetaById.delete(tabId);
+      continue;
+    }
+
+    try {
+      const liveTab = await chrome.tabs.get(Number(tabId));
+      if (liveTab.pinned || !isNormalWindow(liveTab.windowId)) {
+        deferredStartupTabMetaById.delete(tabId);
+        continue;
+      }
+
+      tabMeta[tabId] = {
+        ...deferredEntry,
+        tabId: liveTab.id,
+        windowId: liveTab.windowId,
+        groupId: liveTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? liveTab.groupId : null,
+        pinned: liveTab.pinned || false,
+        url: liveTab.url || deferredEntry.url || '',
+      };
+      addedCount++;
+    } catch {
+    }
+
+    deferredStartupTabMetaById.delete(tabId);
+  }
+
+  if (addedCount > 0) {
+    await writeMultipleStateEntries({ [STORAGE_KEYS.TAB_META]: tabMeta });
+    logger.info('Flushed deferred startup tabs into storage', { addedCount }, correlationId);
+  }
+
+  return addedCount;
+}
+
+async function retryPendingStartupReconciliation(trigger) {
+  if (!startupReconciliationPending) return false;
+
+  const correlationId = logger.correlationId();
+  const reconciliationResult = await reconcileStoredStateWithBrowser(correlationId);
+  if (!reconciliationResult.completed) {
+    logger.info('Startup reconciliation still pending', {
+      trigger,
+      reason: reconciliationResult.reason,
+    }, correlationId);
+    return false;
+  }
+
+  startupReconciliationPending = false;
+  await runTabAgingEvaluationCycle(correlationId);
+  await probeAndSyncCurrentFocusState(correlationId);
+  await flushDeferredStartupCreatedTabsIntoStorage(correlationId);
+  logger.info('Startup reconciliation completed after retry', { trigger }, correlationId);
+  return true;
+}
+
 /**
  * Scans all currently open browser tabs and creates fresh metadata entries for each.
  * Called on first extension install (when there's no existing stored state).
@@ -1334,12 +1451,11 @@ async function scanAndTrackAllExistingTabs(correlationId) {
 async function reconcileStoredStateWithBrowser(correlationId) {
   if (pendingReconciliationPromise) {
     logger.info('reconcileState already running, waiting for existing call', null, correlationId);
-    await pendingReconciliationPromise;
-    return;
+    return await pendingReconciliationPromise;
   }
   pendingReconciliationPromise = performReconciliation(correlationId);
   try {
-    await pendingReconciliationPromise;
+    return await pendingReconciliationPromise;
   } finally {
     pendingReconciliationPromise = null;
   }
@@ -1358,20 +1474,33 @@ async function performReconciliation(correlationId) {
     // Only reconcile tabs in normal browser windows — DevTools, popups, and app
     // windows are excluded from all tracking.
     let allBrowserTabs, allBrowserWindows;
+    let browserTabsWithRealUrls = 0;
+    const hasStoredTrackedState = Object.keys(storedTabMeta).length > 0 || Object.keys(storedWindowState).length > 0;
     if (storedMatchableUrlCount > 0) {
-      const deadline = Date.now() + 10_000;
-      while (Date.now() < deadline) {
-        [allBrowserTabs, allBrowserWindows] = await Promise.all([
-          chrome.tabs.query({}),
-          chrome.windows.getAll({ windowTypes: ['normal'] }),
-        ]);
-        const normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
-        allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
-        const browserTabsWithRealUrls = allBrowserTabs.filter(
-          (tab) => !tab.pinned && isMatchableUrl(tab.url),
-        ).length;
-        if (browserTabsWithRealUrls >= storedMatchableUrlCount) break;
-        await new Promise((resolve) => setTimeout(resolve, 300));
+      [allBrowserTabs, allBrowserWindows] = await Promise.all([
+        chrome.tabs.query({}),
+        chrome.windows.getAll({ windowTypes: ['normal'] }),
+      ]);
+      let normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
+      allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
+      browserTabsWithRealUrls = allBrowserTabs.filter(
+        (tab) => !tab.pinned && isMatchableUrl(tab.url),
+      ).length;
+
+      if (!hasStoredTrackedState || allBrowserWindows.length > 0 || allBrowserTabs.length > 0) {
+        const deadline = Date.now() + 10_000;
+        while (Date.now() < deadline && browserTabsWithRealUrls < storedMatchableUrlCount) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          [allBrowserTabs, allBrowserWindows] = await Promise.all([
+            chrome.tabs.query({}),
+            chrome.windows.getAll({ windowTypes: ['normal'] }),
+          ]);
+          normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
+          allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
+          browserTabsWithRealUrls = allBrowserTabs.filter(
+            (tab) => !tab.pinned && isMatchableUrl(tab.url),
+          ).length;
+        }
       }
     } else {
       [allBrowserTabs, allBrowserWindows] = await Promise.all([
@@ -1380,6 +1509,25 @@ async function performReconciliation(correlationId) {
       ]);
       const normalWinIds = new Set(allBrowserWindows.map((w) => w.id));
       allBrowserTabs = allBrowserTabs.filter((tab) => normalWinIds.has(tab.windowId));
+      browserTabsWithRealUrls = allBrowserTabs.filter(
+        (tab) => !tab.pinned && isMatchableUrl(tab.url),
+      ).length;
+    }
+
+    const hasLiveBrowserState = allBrowserWindows.length > 0 || allBrowserTabs.length > 0;
+    if (hasStoredTrackedState && !hasLiveBrowserState) {
+      logger.info('Deferring reconciliation until live browser state is available', {
+        storedTabCount: Object.keys(storedTabMeta).length,
+        storedWindowCount: Object.keys(storedWindowState).length,
+      }, correlationId);
+      return { completed: false, reason: 'no_live_browser_state' };
+    }
+    if (storedMatchableUrlCount > 0 && browserTabsWithRealUrls === 0 && allBrowserTabs.length > 0) {
+      logger.info('Deferring reconciliation until restored tabs have real URLs', {
+        storedMatchableUrlCount,
+        tabsInChrome: allBrowserTabs.length,
+      }, correlationId);
+      return { completed: false, reason: 'no_matchable_live_urls' };
     }
 
     const currentActiveTime = await getCurrentTotalActiveTimeMs();
@@ -1416,6 +1564,11 @@ async function performReconciliation(correlationId) {
         matchedEntry.windowId = browserTab.windowId;
         matchedEntry.groupId = liveGroupId;
         matchedEntry.pinned = browserTab.pinned;
+        // Reset isSpecialGroup — managed-group membership will be re-established
+        // by the first sorting cycle.  Preserving a stale `true` from the previous
+        // session causes determineFreshestStatusInGroup to skip this tab, which can
+        // leave its group unsorted and break zone ordering after restart.
+        matchedEntry.isSpecialGroup = false;
         // Prefer the browser's URL, but don't overwrite a meaningful stored URL
         // with a generic placeholder — during session restore, Chrome may report
         // chrome://newtab/ for tabs that haven't loaded their real URL yet.
@@ -1660,7 +1813,9 @@ async function performReconciliation(correlationId) {
       chromeWindowTypes: allBrowserWindows.map((w) => ({ id: w.id, type: w.type })),
       storedWindowCount: Object.keys(storedWindowState).length,
     }, correlationId);
+    return { completed: true };
   } catch (error) {
     logger.error('State reconciliation failed', { error: error.message, errorCode: ERROR_CODES.ERR_RECOVERY }, correlationId);
+    return { completed: false, reason: 'error' };
   }
 }
