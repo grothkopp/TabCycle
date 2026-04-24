@@ -218,7 +218,7 @@ describe('discarded restore navigation integration', () => {
     expect(updated.refreshActiveTime).toBe(5000);
     expect(updated.status).toBe('green');
     expect(updated.url).toBe('https://example.org');
-    expect(self.__lastNavigationResetDebug).toMatchObject({
+    expect(globalThis.self.__lastNavigationResetDebug).toMatchObject({
       tabId,
       source: 'onCommitted',
       outcome: 'handled',
