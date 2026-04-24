@@ -220,7 +220,7 @@ await import('../../src/background/service-worker.js');
 
 describe('startup reconciliation integration', () => {
   beforeEach(() => {
-    self.__resetServiceWorkerDebugState();
+    globalThis.self.__resetServiceWorkerDebugState();
     for (const key of Object.keys(store)) delete store[key];
     liveTabs = [];
     liveWindows = [{ id: 1, type: 'normal' }];
@@ -317,7 +317,7 @@ describe('startup reconciliation integration', () => {
     });
 
     const startupPromise = listeners.runtimeOnStartup();
-    await waitFor(() => evaluationStarted || self.__evaluationCycleRunning, 100);
+    await waitFor(() => evaluationStarted || globalThis.self.__evaluationCycleRunning, 100);
 
     const newTab = {
       id: 202,
@@ -347,6 +347,75 @@ describe('startup reconciliation integration', () => {
     });
     expect(tracked.refreshActiveTime).toBe(5000);
     expect(typeof tracked.refreshWallTime).toBe('number');
+  });
+
+  it('keeps retrying startup reconciliation until restored tabs expose real URLs', async () => {
+    jest.useFakeTimers();
+
+    try {
+      store[STORAGE_KEYS.TAB_META] = {
+        1: {
+          tabId: 1,
+          windowId: 9,
+          refreshActiveTime: 111,
+          refreshWallTime: 222,
+          status: 'yellow',
+          groupId: null,
+          isSpecialGroup: false,
+          managedGroupType: null,
+          pinned: false,
+          url: 'https://kept.example',
+        },
+      };
+      store[STORAGE_KEYS.WINDOW_STATE] = {};
+
+      liveWindows = [{ id: 1, type: 'normal' }];
+      liveTabs = [{
+        id: 101,
+        windowId: 1,
+        groupId: -1,
+        pinned: false,
+        url: 'chrome://newtab/',
+        status: 'complete',
+      }];
+
+      const startupPromise = listeners.runtimeOnStartup();
+      await jest.advanceTimersByTimeAsync(10_500);
+      await startupPromise;
+
+      expect(store[STORAGE_KEYS.TAB_META][101]).toBeUndefined();
+
+      await jest.advanceTimersByTimeAsync(10_500);
+      expect(store[STORAGE_KEYS.TAB_META][101]).toBeUndefined();
+
+      liveTabs = [{
+        id: 101,
+        windowId: 1,
+        groupId: -1,
+        pinned: false,
+        url: 'https://kept.example',
+        status: 'complete',
+      }];
+
+      await jest.advanceTimersByTimeAsync(500);
+      await waitFor(() => Boolean(store[STORAGE_KEYS.TAB_META][101]));
+
+      expect(store[STORAGE_KEYS.TAB_META][101]).toMatchObject({
+        tabId: 101,
+        windowId: 1,
+        refreshActiveTime: 111,
+        refreshWallTime: 222,
+        status: 'yellow',
+        groupId: null,
+        isSpecialGroup: false,
+        managedGroupType: null,
+        pinned: false,
+        url: 'https://kept.example',
+      });
+      expect(store[STORAGE_KEYS.TAB_META][1]).toBeUndefined();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('defers reconciliation until delayed restored windows arrive and remaps managed groups', async () => {
@@ -456,7 +525,7 @@ describe('startup reconciliation integration', () => {
       { id: 102, windowId: 1, groupId: 501, pinned: false, url: 'https://red-two.example', status: 'complete' },
     ];
 
-    await self.__runEvaluationCycle('test-self-heal-managed');
+    await globalThis.self.__runEvaluationCycle('test-self-heal-managed');
 
     expect(store[STORAGE_KEYS.TAB_META][102]).toMatchObject({
       tabId: 102,
@@ -495,7 +564,7 @@ describe('startup reconciliation integration', () => {
       { id: 201, windowId: 1, groupId: 61, pinned: false, url: 'https://zone.example', status: 'complete' },
     ];
 
-    await self.__runEvaluationCycle('test-self-heal-zone');
+    await globalThis.self.__runEvaluationCycle('test-self-heal-zone');
 
     expect(store[STORAGE_KEYS.TAB_META][201]).toMatchObject({
       tabId: 201,

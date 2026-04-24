@@ -1278,7 +1278,9 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource, eventUrl = '') {
             refreshedEntry.isSpecialGroup = true;
             refreshedEntry.managedGroupType = getManagedGroupType(liveGroupId, liveTab.windowId, windowState);
           }
-        } catch { }
+        } catch (ignoredError) {
+          void ignoredError;
+        }
       }
 
       if (isInManagedGroup) {
@@ -1727,7 +1729,8 @@ async function flushDeferredStartupCreatedTabsIntoStorage(correlationId) {
           url: liveTab.url || deferredEntry.url || '',
         };
         addedCount++;
-      } catch {
+      } catch (ignoredError) {
+        void ignoredError;
       }
 
       deferredStartupTabMetaById.delete(tabId);
@@ -1753,6 +1756,7 @@ async function retryPendingStartupReconciliation(trigger) {
       trigger,
       reason: reconciliationResult.reason,
     }, correlationId);
+    scheduleStartupReconciliationRetry(trigger);
     return false;
   }
 
