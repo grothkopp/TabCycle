@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.5](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.4...tabcycle-v1.1.5) (2026-04-29)
+
+
+### Bug Fixes
+
+* **navigation:** reset and stabilize tracked-state ([#17](https://github.com/grothkopp/TabCycle/issues/17)) ([a18a2c3](https://github.com/grothkopp/TabCycle/commit/a18a2c3b5bf9549af9504fc2fd779ed2491cc2f3))
+
 ## [1.1.4](https://github.com/grothkopp/TabCycle/compare/tabcycle-v1.1.3...tabcycle-v1.1.4) (2026-03-30)
 
 
