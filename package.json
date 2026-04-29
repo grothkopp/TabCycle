@@ -5,7 +5,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "test": "npm run test:unit -- --runInBand && npm run test:integration -- --runInBand && npm run test:e2e -- --runInBand",
+    "test:all": "npm run test && npm run test:e2e-chrome",
     "test:unit": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/unit",
     "test:integration": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/integration",
     "test:e2e": "node --experimental-vm-modules node_modules/.bin/jest --testPathPattern=tests/e2e/",

@@ -579,6 +579,30 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
       specialGroupIds: [...managedGroupIds],
     });
 
+    // Reconcile tabMeta groupIds against fresh Chrome state.  Between the
+    // global groupId reconciliation (in the evaluation cycle) and here, group
+    // assignments can drift — especially during startup when session restore
+    // may still be settling.  Without this, determineFreshestStatusInGroup
+    // finds no matching tabs and the group is silently excluded from sorting,
+    // leaving it wherever Chrome placed it and breaking zone ordering.
+    let sortLocalGroupIdFixes = 0;
+    for (const browserTab of allBrowserTabs) {
+      if (browserTab.pinned) continue;
+      const tabEntry = tabMeta[browserTab.id] || tabMeta[String(browserTab.id)];
+      if (!tabEntry) continue;
+      const actualGroupId = browserTab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE ? browserTab.groupId : null;
+      if (tabEntry.groupId !== actualGroupId) {
+        tabEntry.groupId = actualGroupId;
+        tabEntry.isSpecialGroup = actualGroupId !== null && managedGroupIds.has(actualGroupId);
+        sortLocalGroupIdFixes++;
+      }
+    }
+    if (sortLocalGroupIdFixes > 0) {
+      logger.info('Sort-local groupId reconciliation fixed stale entries', {
+        windowId, fixes: sortLocalGroupIdFixes,
+      });
+    }
+
     // ── Step 2: Sort ungrouped tabs into managed groups ──────────────
     for (const browserTab of allBrowserTabs) {
       if (browserTab.pinned) continue;

@@ -28,6 +28,7 @@ export function createFreshTabMetadata(tab, currentActiveTimeMs) {
     status: TAB_LIFECYCLE_STAGE.GREEN,
     groupId: tab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? tab.groupId : null,
     isSpecialGroup: false,
+    managedGroupType: null,
     pinned: tab.pinned || false,
     url: tab.url || '',
   };
@@ -48,6 +49,7 @@ export function resetTabAgeAfterNavigation(existingMetadata, currentActiveTimeMs
     refreshActiveTime: currentActiveTimeMs,
     refreshWallTime: Date.now(),
     status: TAB_LIFECYCLE_STAGE.GREEN,
+    managedGroupType: existingMetadata.managedGroupType ?? null,
     url: navigatedToUrl || existingMetadata.url || '',
   };
 }
@@ -75,6 +77,7 @@ export function reconcileTabMetadataWithBrowserTabs(storedMetadata, currentBrows
         ...existingEntry,
         windowId: browserTab.windowId,
         groupId: browserTab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? browserTab.groupId : null,
+        managedGroupType: existingEntry.managedGroupType ?? null,
         pinned: browserTab.pinned || false,
         url: browserTab.url || existingEntry.url || '',
       };
@@ -87,6 +90,7 @@ export function reconcileTabMetadataWithBrowserTabs(storedMetadata, currentBrows
         status: TAB_LIFECYCLE_STAGE.GREEN,
         groupId: browserTab.groupId !== CHROME_UNGROUPED_TAB_SENTINEL ? browserTab.groupId : null,
         isSpecialGroup: false,
+        managedGroupType: null,
         pinned: false,
         url: browserTab.url || '',
       };

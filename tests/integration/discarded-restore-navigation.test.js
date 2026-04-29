@@ -177,4 +177,55 @@ describe('discarded restore navigation integration', () => {
     expect(updated.refreshWallTime).toBe(originalRefreshWallTime);
     expect(updated.status).toBe('yellow');
   });
+
+  it('resets tab age on a real URL change even when live-state sync updates the stored URL first', async () => {
+    await loadServiceWorker();
+
+    const tabId = 8;
+    const originalRefreshWallTime = 12345;
+    store[STORAGE_KEYS.TAB_META] = {
+      [tabId]: {
+        tabId,
+        windowId: 1,
+        refreshActiveTime: 1000,
+        refreshWallTime: originalRefreshWallTime,
+        status: 'yellow',
+        groupId: null,
+        isSpecialGroup: false,
+        managedGroupType: null,
+        pinned: false,
+        url: 'https://example.com',
+      },
+    };
+    store[STORAGE_KEYS.WINDOW_STATE] = {};
+
+    const navigatedTab = {
+      id: tabId,
+      windowId: 1,
+      groupId: -1,
+      pinned: false,
+      discarded: false,
+      status: 'complete',
+      url: 'https://example.org',
+    };
+    globalThis.chrome.tabs.get.mockResolvedValue(navigatedTab);
+    globalThis.chrome.tabs.query.mockResolvedValue([navigatedTab]);
+
+    await listeners.webNavigationOnCommitted({ tabId, frameId: 0, url: 'https://example.org' });
+
+    const updated = store[STORAGE_KEYS.TAB_META][tabId];
+    expect(updated.refreshWallTime).not.toBe(originalRefreshWallTime);
+    expect(updated.refreshActiveTime).toBe(5000);
+    expect(updated.status).toBe('green');
+    expect(updated.url).toBe('https://example.org');
+    expect(globalThis.self.__lastNavigationResetDebug).toMatchObject({
+      tabId,
+      source: 'onCommitted',
+      outcome: 'handled',
+      navigatedToUrl: 'https://example.org',
+      status: 'green',
+      groupId: null,
+      isSpecialGroup: false,
+    });
+  });
 });

@@ -154,6 +154,12 @@ export function validateTabMeta(tabMetaCollection) {
     if (typeof tabEntry.isSpecialGroup !== 'boolean') {
       errors.push(`${errorPrefix}.isSpecialGroup must be a boolean`);
     }
+    if (tabEntry.managedGroupType !== undefined
+      && tabEntry.managedGroupType !== null
+      && tabEntry.managedGroupType !== 'yellow'
+      && tabEntry.managedGroupType !== 'red') {
+      errors.push(`${errorPrefix}.managedGroupType must be null, "yellow", or "red"`);
+    }
     if (typeof tabEntry.pinned !== 'boolean') {
       errors.push(`${errorPrefix}.pinned must be a boolean`);
     }

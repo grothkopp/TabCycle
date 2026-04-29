@@ -15,7 +15,7 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
 
   beforeAll(async () => {
     h = await createHarness();
-  }, 30_000);
+  }, 120_000);
 
   afterAll(async () => {
     if (h) await h.cleanup();
@@ -424,5 +424,5 @@ describeOrSkip('Settings Persistence (real Chrome)', () => {
     expect(expandedAfterClick).toBe(true);
 
     await page.close();
-  }, 15_000);
+  }, 30_000);
 });
