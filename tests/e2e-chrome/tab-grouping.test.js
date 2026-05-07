@@ -167,4 +167,50 @@ describeOrSkip('Tab Grouping (real Chrome)', () => {
 
     await h.closeTab(tabId);
   }, 25_000);
+
+  it('reloading a yellow special-group tab returns it to green and ungroups it', async () => {
+    const tabId = await h.openTab('https://example.com');
+    await h.backdateTab(tabId, 2500);
+    await h.triggerEvaluation();
+
+    let tab = await h.getTab(tabId);
+    expect(tab.groupId).not.toBe(-1);
+
+    await h.navigateTab(tabId, 'https://example.com');
+    await h.waitForSortUpdate();
+
+    tab = await h.getTab(tabId);
+    expect(tab.groupId).toBe(-1);
+
+    const meta = await h.getTabMeta();
+    const entry = meta[tabId] || meta[String(tabId)];
+    expect(entry.status).toBe('green');
+    expect(entry.groupId).toBeNull();
+    expect(entry.isSpecialGroup).toBe(false);
+
+    await h.closeTab(tabId);
+  }, 25_000);
+
+  it('reloading a red special-group tab returns it to green and ungroups it', async () => {
+    const tabId = await h.openTab('https://example.com');
+    await h.backdateTab(tabId, 4500);
+    await h.triggerEvaluation();
+
+    let tab = await h.getTab(tabId);
+    expect(tab.groupId).not.toBe(-1);
+
+    await h.navigateTab(tabId, 'https://example.com');
+    await h.waitForSortUpdate();
+
+    tab = await h.getTab(tabId);
+    expect(tab.groupId).toBe(-1);
+
+    const meta = await h.getTabMeta();
+    const entry = meta[tabId] || meta[String(tabId)];
+    expect(entry.status).toBe('green');
+    expect(entry.groupId).toBeNull();
+    expect(entry.isSpecialGroup).toBe(false);
+
+    await h.closeTab(tabId);
+  }, 25_000);
 });

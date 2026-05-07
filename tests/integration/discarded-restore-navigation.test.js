@@ -3,6 +3,7 @@ import { STORAGE_KEYS } from '../../src/shared/constants.js';
 
 const store = {};
 const listeners = {};
+let groupManager;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -137,6 +138,7 @@ async function loadServiceWorker() {
     placeNewlyCreatedTabNearItsContext: jest.fn(async () => {}),
   }));
 
+  groupManager = await import('../../src/background/group-manager.js');
   await import('../../src/background/service-worker.js');
 }
 
@@ -223,6 +225,77 @@ describe('discarded restore navigation integration', () => {
       source: 'onCommitted',
       outcome: 'handled',
       navigatedToUrl: 'https://example.org',
+      status: 'green',
+      groupId: null,
+      isSpecialGroup: false,
+    });
+  });
+
+  it('resets same-url reload for a tab in a special group and returns it to green', async () => {
+    await loadServiceWorker();
+
+    const tabId = 9;
+    const specialGroupId = 50;
+    const originalRefreshWallTime = 12345;
+    store[STORAGE_KEYS.TAB_META] = {
+      [tabId]: {
+        tabId,
+        windowId: 1,
+        refreshActiveTime: 1000,
+        refreshWallTime: originalRefreshWallTime,
+        status: 'yellow',
+        groupId: specialGroupId,
+        isSpecialGroup: true,
+        managedGroupType: 'yellow',
+        pinned: false,
+        url: 'https://example.com',
+      },
+    };
+    store[STORAGE_KEYS.WINDOW_STATE] = {
+      1: {
+        specialGroups: { yellow: specialGroupId, red: null },
+        groupZones: {},
+        groupNaming: {},
+      },
+    };
+    store[STORAGE_KEYS.SETTINGS] = {
+      timeMode: 'active',
+      thresholds: { greenToYellow: 4000, yellowToRed: 8000, redToGone: 24000 },
+      agingEnabled: true,
+      tabSortingEnabled: true,
+      tabgroupSortingEnabled: true,
+      tabgroupColoringEnabled: true,
+    };
+
+    const reloadedTab = {
+      id: tabId,
+      windowId: 1,
+      groupId: specialGroupId,
+      pinned: false,
+      discarded: false,
+      status: 'complete',
+      url: 'https://example.com',
+    };
+    globalThis.chrome.tabs.get.mockResolvedValue(reloadedTab);
+    globalThis.chrome.tabs.query.mockResolvedValue([reloadedTab]);
+    groupManager.isManagedAgingGroup.mockReturnValue(true);
+    groupManager.getManagedGroupType.mockReturnValue('yellow');
+
+    await listeners.webNavigationOnCommitted({ tabId, frameId: 0, url: 'https://example.com' });
+
+    const updated = store[STORAGE_KEYS.TAB_META][tabId];
+    expect(updated.refreshWallTime).not.toBe(originalRefreshWallTime);
+    expect(updated.refreshActiveTime).toBe(5000);
+    expect(updated.status).toBe('green');
+    expect(updated.groupId).toBeNull();
+    expect(updated.isSpecialGroup).toBe(false);
+    expect(groupManager.removeTabFromItsGroup).toHaveBeenCalledWith(tabId);
+    expect(globalThis.chrome.tabs.move).toHaveBeenCalledWith(tabId, { index: 0 });
+    expect(globalThis.self.__lastNavigationResetDebug).toMatchObject({
+      tabId,
+      source: 'onCommitted',
+      outcome: 'handled',
+      navigatedToUrl: 'https://example.com',
       status: 'green',
       groupId: null,
       isSpecialGroup: false,

@@ -1041,6 +1041,7 @@ chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
 
 chrome.tabs.onMoved.addListener(async (tabId, moveInfo) => {
   if (isEvaluationCycleInProgress || isSortUpdateInProgress) return;
+  if (isTabPlacementInProgress) return;
   if (tabsCurrentlyBeingResetByNavigation.has(tabId)) return;
   const correlationId = logger.correlationId();
   try {
@@ -1189,8 +1190,8 @@ function checkAndClearDiscardRestoreMarker(tabId, currentTime) {
 }
 
 /**
- * Resets a tab's age when the user navigates to a new page.
- * Suppresses non-user navigations (session restore, discarded tab reload, same-URL reload).
+ * Resets a tab's age when the user navigates to a new page or reloads.
+ * Suppresses non-user navigations (session restore, discarded tab reload).
  * If the tab was in a managed group, it's ungrouped and moved to the green zone.
  */
 async function resetTabAgeOnUserNavigation(tabId, eventSource, eventUrl = '') {
@@ -1243,20 +1244,12 @@ async function resetTabAgeOnUserNavigation(tabId, eventSource, eventUrl = '') {
       const windowState = storedState[STORAGE_KEYS.WINDOW_STATE] || {};
       const settings = storedState[STORAGE_KEYS.SETTINGS] || {};
       const currentActiveTime = await getCurrentTotalActiveTimeMs();
-      const preSyncEntry = tabMeta[tabId] || tabMeta[String(tabId)] || null;
-      const preSyncUrl = preSyncEntry?.url || '';
 
       await synchronizeTrackedStateWithBrowser(tabMeta, windowState, currentActiveTime, correlationId, tab.windowId, false, settings);
       const existingEntry = tabMeta[tabId] || tabMeta[String(tabId)];
       if (!existingEntry) {
         logger.debug('Navigation for untracked tab, skipping', { tabId, source: eventSource }, correlationId);
         self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'untracked-tab', windowId: tab.windowId };
-        return {};
-      }
-
-      if (navigatedToUrl && preSyncUrl && navigatedToUrl === preSyncUrl) {
-        logger.debug('Navigation URL matches stored URL, suppressing age reset', { tabId, source: eventSource, url: navigatedToUrl }, correlationId);
-        self.__lastNavigationResetDebug = { tabId, source: eventSource, outcome: 'same-url', url: navigatedToUrl };
         return {};
       }
 

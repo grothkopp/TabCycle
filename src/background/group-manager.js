@@ -721,8 +721,6 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
         return indexA - indexB;
       });
 
-    const previousZoneAssignments = { ...windowEntry.groupZones };
-
     const groupStatusMap = new Map();
     for (const group of userGroupsSortedByPosition) {
       const groupLifecycleStage = determineFreshestStatusInGroup(group.id, tabMeta);
@@ -796,33 +794,15 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
 
     const survivingUserGroups = userGroupsSortedByPosition.filter((group) => groupStatusMap.has(group.id));
 
-    // Detect groups that just transitioned into a new zone
-    const groupsThatJustChangedZone = new Set();
-    for (const group of survivingUserGroups) {
-      const currentStage = groupStatusMap.get(group.id);
-      const previousZone = previousZoneAssignments[group.id] || previousZoneAssignments[String(group.id)];
-      if (previousZone === undefined) {
-        if (currentStage === 'green') groupsThatJustChangedZone.add(group.id);
-      } else if (previousZone !== currentStage) {
-        groupsThatJustChangedZone.add(group.id);
-      }
-    }
-
-    // Build sorted list per zone: newly arrived groups go to the LEFT of their zone
+    // Build sorted list per zone
     const greenZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'green');
     const yellowZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'yellow');
     const redZoneGroups = survivingUserGroups.filter((group) => groupStatusMap.get(group.id) === 'red');
 
-    const sortNewlyArrivedFirst = (groups) => {
-      const justArrived = groups.filter((group) => groupsThatJustChangedZone.has(group.id));
-      const alreadyInZone = groups.filter((group) => !groupsThatJustChangedZone.has(group.id));
-      return [...justArrived, ...alreadyInZone];
-    };
-
     const desiredUserGroupOrder = [
-      ...sortNewlyArrivedFirst(greenZoneGroups),
-      ...sortNewlyArrivedFirst(yellowZoneGroups),
-      ...sortNewlyArrivedFirst(redZoneGroups),
+      ...greenZoneGroups,
+      ...yellowZoneGroups,
+      ...redZoneGroups,
     ];
 
     // Insert managed groups at zone boundaries
@@ -879,18 +859,82 @@ export async function sortTabsAndGroupsByLifecycleZone(windowId, tabMeta, window
     });
 
     if (isGroupSortingEnabled && currentGroupIds.join(',') !== desiredGroupIds.join(',')) {
-      for (const group of desiredFullOrder) {
+      const mutableCurrentGroupIds = [...currentGroupIds];
+      const desiredPositionByGroupId = new Map();
+      desiredFullOrder.forEach((group, index) => {
+        desiredPositionByGroupId.set(group.id, index);
+      });
+
+      const getFirstTabIndexForGroup = async (groupId) => {
+        const liveTabs = await chrome.tabs.query({ windowId: Number(windowId) });
+        const firstTabInCurrentGroup = liveTabs
+          .filter((tab) => tab.groupId === groupId)
+          .sort((tabA, tabB) => tabA.index - tabB.index)[0];
+        return firstTabInCurrentGroup ? firstTabInCurrentGroup.index : -1;
+      };
+
+      for (let targetPosition = 0; targetPosition < desiredGroupIds.length; targetPosition++) {
+        const desiredGroup = desiredFullOrder[targetPosition];
+        const desiredGroupId = desiredGroup.id;
+        if (mutableCurrentGroupIds[targetPosition] === desiredGroupId) continue;
+
+        const currentGroupAtTargetPosition = mutableCurrentGroupIds[targetPosition];
+        const currentGroupDesiredPosition = desiredPositionByGroupId.get(currentGroupAtTargetPosition);
+
+        const moveCurrentGroupRight = desiredGroup._special === true
+          && currentGroupDesiredPosition !== undefined
+          && currentGroupDesiredPosition > targetPosition;
+
+        if (moveCurrentGroupRight) {
+          let targetIndex = -1;
+          const anchorGroupId = mutableCurrentGroupIds[currentGroupDesiredPosition + 1];
+          if (anchorGroupId !== undefined) {
+            targetIndex = await getFirstTabIndexForGroup(anchorGroupId);
+          }
+
+          try {
+            await chrome.tabGroups.move(currentGroupAtTargetPosition, { index: targetIndex });
+            sortingResults.groupsMoved++;
+            mutableCurrentGroupIds.splice(targetPosition, 1);
+            mutableCurrentGroupIds.splice(currentGroupDesiredPosition, 0, currentGroupAtTargetPosition);
+          } catch (error) {
+            if (error?.message?.includes('cannot be edited')) {
+              logger.warn('Group sorting blocked by drag lock, will retry next cycle', { windowId });
+              break;
+            }
+            logger.warn('Failed to move group to zone', {
+              groupId: currentGroupAtTargetPosition,
+              zone: managedGroupIdsAfterMoves.has(currentGroupAtTargetPosition) ? 'special' : groupStatusMap.get(currentGroupAtTargetPosition),
+              error: error.message,
+              errorCode: ERROR_CODES.ERR_GROUP_MOVE,
+            });
+          }
+          continue;
+        }
+
+        let targetIndex = -1;
+        if (currentGroupAtTargetPosition !== undefined) {
+          targetIndex = await getFirstTabIndexForGroup(currentGroupAtTargetPosition);
+        }
+
         try {
-          await chrome.tabGroups.move(group.id, { index: -1 });
+          await chrome.tabGroups.move(desiredGroupId, { index: targetIndex });
           sortingResults.groupsMoved++;
+          const currentPosition = mutableCurrentGroupIds.indexOf(desiredGroupId);
+          if (currentPosition !== -1) {
+            mutableCurrentGroupIds.splice(currentPosition, 1);
+            mutableCurrentGroupIds.splice(targetPosition, 0, desiredGroupId);
+          }
         } catch (error) {
           if (error?.message?.includes('cannot be edited')) {
             logger.warn('Group sorting blocked by drag lock, will retry next cycle', { windowId });
             break;
           }
           logger.warn('Failed to move group to zone', {
-            groupId: group.id, zone: group._special ? 'special' : groupStatusMap.get(group.id),
-            error: error.message, errorCode: ERROR_CODES.ERR_GROUP_MOVE,
+            groupId: desiredGroupId,
+            zone: desiredGroup._special ? 'special' : groupStatusMap.get(desiredGroupId),
+            error: error.message,
+            errorCode: ERROR_CODES.ERR_GROUP_MOVE,
           });
         }
       }
